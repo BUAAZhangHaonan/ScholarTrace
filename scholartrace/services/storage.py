@@ -72,6 +72,9 @@ class StorageService:
                 source_provenance TEXT,
                 citation_count INTEGER DEFAULT 0,
                 reference_count INTEGER DEFAULT 0,
+                pdf_url TEXT,
+                html_url TEXT,
+                oa_url TEXT,
                 created_at TEXT,
                 updated_at TEXT
             );
@@ -198,6 +201,9 @@ class StorageService:
             source_provenance=self._json_to_list(row["source_provenance"]),
             citation_count=row["citation_count"] or 0,
             reference_count=row["reference_count"] or 0,
+            pdf_url=row["pdf_url"] if "pdf_url" in row.keys() else None,
+            html_url=row["html_url"] if "html_url" in row.keys() else None,
+            oa_url=row["oa_url"] if "oa_url" in row.keys() else None,
             created_at=self._str_to_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=self._str_to_dt(row["updated_at"]) or datetime.utcnow(),
         )
@@ -211,8 +217,9 @@ class StorageService:
                 title, authors, year, venue, abstract,
                 relevance_score, recency_score, influence_score, venue_score, composite_score,
                 fulltext_available, access_status, source_provenance,
-                citation_count, reference_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                citation_count, reference_count, pdf_url, html_url, oa_url,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 work.id,
@@ -237,6 +244,9 @@ class StorageService:
                 self._list_to_json(work.source_provenance),
                 work.citation_count,
                 work.reference_count,
+                work.pdf_url,
+                work.html_url,
+                work.oa_url,
                 self._dt_to_str(work.created_at),
                 self._dt_to_str(work.updated_at),
             ),

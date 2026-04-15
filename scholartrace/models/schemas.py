@@ -60,6 +60,9 @@ class Work(BaseModel):
     source_provenance: list[str] = Field(default_factory=list)
     citation_count: int = 0
     reference_count: int = 0
+    pdf_url: str | None = None
+    html_url: str | None = None
+    oa_url: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
