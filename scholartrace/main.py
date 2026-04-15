@@ -1,23 +1,6 @@
-import asyncio
+"""CLI entry points for ScholarTrace."""
 
 from scholartrace.config import get_settings
-
-
-def create_app():
-    """Create and return the FastAPI application."""
-    from fastapi import FastAPI
-
-    app = FastAPI(
-        title="ScholarTrace",
-        version="0.1.0",
-        description="Multi-source scholarly literature discovery, ranking, and tracing",
-    )
-
-    @app.get("/health")
-    async def health():
-        return {"status": "ok"}
-
-    return app
 
 
 def run_api():
@@ -25,8 +8,12 @@ def run_api():
     import uvicorn
 
     settings = get_settings()
-    app = create_app()
-    uvicorn.run(app, host=settings.api_host, port=settings.api_port)
+    uvicorn.run(
+        "scholartrace.api.rest:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=True,
+    )
 
 
 def run_mcp():
