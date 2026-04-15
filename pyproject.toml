@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scholartrace"
+version = "0.1.0"
+description = "Multi-source scholarly literature discovery, ranking, and tracing system"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "mcp>=1.6.0",
+    "aiofiles>=24.1.0",
+    "PyMuPDF>=1.25.0",
+    "beautifulsoup4>=4.12.0",
+    "scikit-learn>=1.6.0",
+    "rapidfuzz>=3.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[project.scripts]
+scholartrace-api = "scholartrace.main:run_api"
+scholartrace-mcp = "scholartrace.main:run_mcp"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
