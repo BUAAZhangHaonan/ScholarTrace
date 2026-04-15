@@ -31,5 +31,8 @@ dev = [
 scholartrace-api = "scholartrace.main:run_api"
 scholartrace-mcp = "scholartrace.main:run_mcp"
 
+[tool.setuptools.packages.find]
+include = ["scholartrace*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
