@@ -131,3 +131,4 @@ class RawCandidate(BaseModel):
     html_url: str | None = None
     oa_url: str | None = None
     license: str | None = None
+    source_provenance: list[str] = Field(default_factory=list)
