@@ -27,7 +27,7 @@ class ArxivConnector(BaseConnector):
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
         self._client = httpx.AsyncClient(
-            base_url="http://export.arxiv.org/api",
+            base_url="https://export.arxiv.org/api",
             timeout=60.0,
         )
 
