@@ -30,9 +30,11 @@ dev = [
 [project.scripts]
 scholartrace-api = "scholartrace.main:run_api"
 scholartrace-mcp = "scholartrace.main:run_mcp"
+scholartrace-check-env = "scholartrace.environment_check_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["scholartrace*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -11,7 +11,7 @@
 - **Multi-key deduplication** — exact ID matching (DOI, arXiv ID, S2 ID, etc.) + fuzzy title matching (threshold 0.85)
 - **Multi-objective ranking** — relevance (TF-IDF), recency (exponential decay), influence (log-normalized citations), venue quality, open-access bonus, source agreement
 - **Full-text acquisition cascade** — arXiv HTML → arXiv PDF (PyMuPDF) → OA URL → abstract-only fallback
-- **Dual interface** — REST API (FastAPI, port 8000) and MCP server (stdio transport, port 8001)
+- **Dual interface** — REST API (FastAPI, port 9000) and MCP server (stdio transport, port 8001)
 - **BigModel GLM integration** — example script for intelligent literature analysis with `glm-5-turbo`
 
 ## Quick Start
@@ -21,9 +21,12 @@
 conda create -n ScholarTrace python=3.13 -y
 conda activate ScholarTrace
 
-# Install
+# Install with pinned dev constraints
 cd ScholarTrace
-pip install -e ".[dev]"
+python -m pip install -r requirements-dev.txt
+
+# Verify imports and pytest collection before running the app
+scholartrace-check-env --include-dev --pytest-collect
 
 # Configure API keys
 cp .env.example .env
@@ -34,11 +37,24 @@ pytest tests/ -v
 
 # Start REST API
 scholartrace-api
-# -> http://localhost:8000
+# -> http://localhost:9000
 
 # Start MCP server (for LLM client integration)
 scholartrace-mcp
 ```
+
+## Reproducible Environment
+
+Use the pinned dev install path when you need a clean local setup:
+
+```bash
+python -m pip install -r requirements-dev.txt
+scholartrace-check-env --include-dev --pytest-collect
+```
+
+- `constraints-dev.txt` pins the local-friendly package set used for development and test runs.
+- `requirements-dev.txt` installs the project in editable mode with dev extras under those constraints.
+- `scripts/check_environment.py` and `scholartrace-check-env` validate declared imports from `pyproject.toml` and can run `pytest --collect-only`.
 
 ## Configuration (.env)
 
@@ -50,7 +66,7 @@ All settings use the `SCHOLARTRACE_` prefix. Copy `.env.example` to `.env` and f
 | `SCHOLARTRACE_OPENALEX_MAILTO` | No | | Email for OpenAlex polite pool |
 | `SCHOLARTRACE_CROSSREF_MAILTO` | No | | Email for Crossref polite pool |
 | `SCHOLARTRACE_API_HOST` | No | `127.0.0.1` | REST API bind host |
-| `SCHOLARTRACE_API_PORT` | No | `8000` | REST API bind port |
+| `SCHOLARTRACE_API_PORT` | No | `9000` | REST API bind port |
 | `SCHOLARTRACE_MAX_RESULTS_PER_SOURCE_PER_QUERY` | No | `200` | Results per source per query |
 | `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | No | `500` | Target total candidate papers |
 | `SCHOLARTRACE_MAX_FULLTEXT_DOWNLOADS` | No | `50` | Maximum full-text downloads per retrieval |
@@ -147,24 +163,24 @@ import httpx
 client = httpx.Client(timeout=30)
 
 # 1. Create theme from a research brief
-resp = client.post("http://localhost:8000/themes",
+resp = client.post("http://localhost:9000/themes",
                    data={"text": "RLHF sycophancy in language models..."})
 theme = resp.json()
 
 # 2. Launch retrieval job
-job = client.post("http://localhost:8000/retrieval/jobs",
+job = client.post("http://localhost:9000/retrieval/jobs",
                   data={"theme_id": theme["id"]}).json()
 
 # 3. Poll for completion
 import time
 while True:
-    status = client.get(f"http://localhost:8000/retrieval/jobs/{job['id']}").json()
+    status = client.get(f"http://localhost:9000/retrieval/jobs/{job['id']}").json()
     if status["status"] in ("completed", "failed"):
         break
     time.sleep(2)
 
 # 4. Get ranked papers (default limit 50)
-papers = client.get(f"http://localhost:8000/themes/{theme['id']}/papers",
+papers = client.get(f"http://localhost:9000/themes/{theme['id']}/papers",
                     params={"limit": 50}).json()
 
 for p in papers[:10]:
