@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from scholartrace.api.contracts import tool_error_json
 from scholartrace.api.security import AccessTokenMiddleware
 from scholartrace.config import Settings, get_settings
+from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,8 @@ def safe_tool(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except runtime_limits.RateLimitExceeded as exc:
+            return tool_error_json("rate_limited", str(exc), retryable=True)
         except Exception:
             logger.exception("MCP tool %s failed", func.__name__)
             return tool_error_json(
@@ -146,14 +149,18 @@ async def search_papers_by_theme(theme_document: str) -> str:
     Returns a JSON string with theme_id, query_count, total_papers, and
     the top-10 papers ranked by composite score.
     """
-    storage = _get_storage()
-    settings = get_settings()
+    async with runtime_limits.budget_manager.enforce(
+        runtime_limits.RETRIEVAL_JOB_POLICY,
+        "mcp",
+    ):
+        storage = _get_storage()
+        settings = get_settings()
 
-    from scholartrace.services.retrieval import run_retrieval_for_document
+        from scholartrace.services.retrieval import run_retrieval_for_document
 
-    theme, works = await run_retrieval_for_document(
-        theme_document, storage, settings
-    )
+        theme, works = await run_retrieval_for_document(
+            theme_document, storage, settings
+        )
 
     total = len(works)
     top_10 = [_work_summary(w) for w in works[:10]]
@@ -222,46 +229,38 @@ async def get_paper_sections(paper_id: str) -> str:
 @mcp.tool()
 @safe_tool
 async def get_paper_fulltext(paper_id: str) -> str:
-    """Get full-text status and content for a paper.
-
-    If the full text has not been acquired yet, attempts to acquire it.
-    Returns a JSON object with acquisition status and (if available) the
-    text content.
-    """
+    """Get cached full-text status and content for a paper."""
     storage = _get_storage()
     settings = get_settings()
-
-    from scholartrace.services.fulltext import acquire_fulltext
+    from scholartrace.services.fulltext import read_cached_fulltext
 
     work = storage.get_work(paper_id)
     if work is None:
         return tool_error_json("not_found", f"Paper {paper_id} not found")
 
-    # Attempt acquisition if not already done
-    if not work.fulltext_available:
-        work = await acquire_fulltext(work, storage, settings)
+    payload = read_cached_fulltext(work, storage, settings)
+    return json.dumps(payload, ensure_ascii=False)
 
-    # Gather any parsed-text artifact
-    artifacts = storage.get_artifacts_by_work(paper_id)
-    parsed_text = None
-    for art in artifacts:
-        if art.kind.value == "parsed_text" and art.local_path:
-            try:
-                parsed_text = open(art.local_path).read()
-            except OSError:
-                pass
-            break
 
-    result = {
-        "paper_id": paper_id,
-        "title": work.title,
-        "fulltext_available": work.fulltext_available,
-        "access_status": work.access_status.value
-        if hasattr(work.access_status, "value")
-        else str(work.access_status),
-        "fulltext_content": parsed_text,
-    }
-    return json.dumps(result, ensure_ascii=False)
+@mcp.tool()
+@safe_tool
+async def acquire_paper_fulltext(paper_id: str) -> str:
+    """Explicitly acquire full text for a paper and return cached state."""
+    storage = _get_storage()
+    settings = get_settings()
+    from scholartrace.services.fulltext import acquire_fulltext, read_cached_fulltext
+
+    work = storage.get_work(paper_id)
+    if work is None:
+        return tool_error_json("not_found", f"Paper {paper_id} not found")
+
+    async with runtime_limits.budget_manager.enforce(
+        runtime_limits.FULLTEXT_ACQUIRE_POLICY,
+        "mcp",
+    ):
+        updated = await acquire_fulltext(work, storage, settings)
+    payload = read_cached_fulltext(updated, storage, settings)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -436,18 +435,22 @@ async def deepxiv_search(
     Returns:
         JSON string with paper summaries.
     """
-    connector = await _get_deepxiv()
+    async with runtime_limits.budget_manager.enforce(
+        runtime_limits.DEEPXIV_SEARCH_POLICY,
+        "mcp",
+    ):
+        connector = await _get_deepxiv()
 
-    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
-    auth_list = [a.strip() for a in authors.split(",") if a.strip()] or None
+        cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+        auth_list = [a.strip() for a in authors.split(",") if a.strip()] or None
 
-    candidates = await connector.search(
-        query,
-        max_results=min(max_results, 200),
-        search_mode=search_mode,
-        categories=cat_list,
-        authors=auth_list,
-    )
+        candidates = await connector.search(
+            query,
+            max_results=min(max_results, 200),
+            search_mode=search_mode,
+            categories=cat_list,
+            authors=auth_list,
+        )
 
     papers = []
     for c in candidates:
@@ -563,28 +566,32 @@ async def deepxiv_agent_filter(
     Returns:
         JSON string with filtered papers, scores, and reasons.
     """
-    connector = await _get_deepxiv()
-    agent = await _get_deepxiv_agent()
+    async with runtime_limits.budget_manager.enforce(
+        runtime_limits.AGENT_FILTER_POLICY,
+        "mcp",
+    ):
+        connector = await _get_deepxiv()
+        agent = await _get_deepxiv_agent()
 
-    candidates = await connector.search(
-        query,
-        max_results=min(max_results, 200),
-        search_mode=search_mode,
-    )
+        candidates = await connector.search(
+            query,
+            max_results=min(max_results, 200),
+            search_mode=search_mode,
+        )
 
-    papers_for_agent = [
-        {
-            "title": c.title,
-            "abstract": c.abstract or "",
-            "arxiv_id": c.arxiv_id,
-            "authors": c.authors,
-            "year": c.year,
-            "citation_count": c.citation_count,
-        }
-        for c in candidates
-    ]
+        papers_for_agent = [
+            {
+                "title": c.title,
+                "abstract": c.abstract or "",
+                "arxiv_id": c.arxiv_id,
+                "authors": c.authors,
+                "year": c.year,
+                "citation_count": c.citation_count,
+            }
+            for c in candidates
+        ]
 
-    filtered = await agent.filter_papers(papers_for_agent, query)
+        filtered = await agent.filter_papers(papers_for_agent, query)
 
     return json.dumps({
         "query": query,

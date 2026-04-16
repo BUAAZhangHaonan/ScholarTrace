@@ -9,8 +9,10 @@ from pathlib import Path
 
 from scholartrace.models.schemas import (
     AccessStatus,
+    AcquisitionState,
     Artifact,
     ArtifactKind,
+    FullTextState,
     JobStatus,
     RetrievalJob,
     Section,
@@ -174,6 +176,16 @@ class StorageService:
                     FOREIGN KEY(theme_id) REFERENCES themes(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS fulltext_states (
+                    work_id TEXT PRIMARY KEY,
+                    acquisition_state TEXT DEFAULT 'missing',
+                    last_attempt_at TEXT,
+                    next_retry_at TEXT,
+                    error_message TEXT,
+                    updated_at TEXT,
+                    FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_artifacts_work_id
                     ON artifacts(work_id);
                 CREATE INDEX IF NOT EXISTS idx_sections_work_id
@@ -182,6 +194,8 @@ class StorageService:
                     ON theme_works(theme_id, rank_order);
                 CREATE INDEX IF NOT EXISTS idx_jobs_theme
                     ON jobs(theme_id);
+                CREATE INDEX IF NOT EXISTS idx_fulltext_state_retry
+                    ON fulltext_states(next_retry_at);
                 """
             )
             self._ensure_indexes(conn)
@@ -343,6 +357,18 @@ class StorageService:
             created_at=self._str_to_dt(row["created_at"]) or datetime.utcnow(),
             updated_at=self._str_to_dt(row["updated_at"]) or datetime.utcnow(),
             completed_at=self._str_to_dt(row["completed_at"]),
+        )
+
+    def _row_to_fulltext_state(self, row: sqlite3.Row) -> FullTextState:
+        return FullTextState(
+            work_id=row["work_id"],
+            acquisition_state=AcquisitionState(
+                row["acquisition_state"] or AcquisitionState.MISSING.value
+            ),
+            last_attempt_at=self._str_to_dt(row["last_attempt_at"]),
+            next_retry_at=self._str_to_dt(row["next_retry_at"]),
+            error_message=row["error_message"],
+            updated_at=self._str_to_dt(row["updated_at"]) or datetime.utcnow(),
         )
 
     # ------------------------------------------------------------------
@@ -705,6 +731,10 @@ class StorageService:
             DELETE FROM jobs
             WHERE theme_id NOT IN (SELECT id FROM themes)
             """,
+            """
+            DELETE FROM fulltext_states
+            WHERE work_id NOT IN (SELECT id FROM works)
+            """,
         ]
         for statement in deletes:
             total_removed += conn.execute(statement).rowcount or 0
@@ -1021,6 +1051,20 @@ class StorageService:
         finally:
             conn.close()
 
+    def count_active_jobs(self) -> int:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM jobs
+                WHERE status IN (?, ?)
+                """,
+                (JobStatus.PENDING.value, JobStatus.RUNNING.value),
+            ).fetchone()
+            return int(row["c"])
+        finally:
+            conn.close()
+
     def update_job_status(self, job_id: str, status: JobStatus | str, **kwargs) -> None:
         normalized_status = status.value if isinstance(status, JobStatus) else status
         with self.transaction(immediate=True) as conn:
@@ -1037,6 +1081,53 @@ class StorageService:
                 f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?",
                 vals,
             )
+
+    # ------------------------------------------------------------------
+    # Full-text state
+    # ------------------------------------------------------------------
+    def save_fulltext_state(
+        self,
+        state: FullTextState,
+        conn: sqlite3.Connection | None = None,
+    ) -> FullTextState:
+        if conn is None:
+            with self.transaction() as tx:
+                return self.save_fulltext_state(state, conn=tx)
+
+        conn.execute(
+            """
+            INSERT INTO fulltext_states (
+                work_id, acquisition_state, last_attempt_at, next_retry_at,
+                error_message, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(work_id) DO UPDATE SET
+                acquisition_state = excluded.acquisition_state,
+                last_attempt_at = excluded.last_attempt_at,
+                next_retry_at = excluded.next_retry_at,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at
+            """,
+            (
+                state.work_id,
+                state.acquisition_state.value,
+                self._dt_to_str(state.last_attempt_at),
+                self._dt_to_str(state.next_retry_at),
+                state.error_message,
+                self._dt_to_str(state.updated_at),
+            ),
+        )
+        return state
+
+    def get_fulltext_state(self, work_id: str) -> FullTextState | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM fulltext_states WHERE work_id = ?",
+                (work_id,),
+            ).fetchone()
+            return self._row_to_fulltext_state(row) if row is not None else None
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Theme-Work link

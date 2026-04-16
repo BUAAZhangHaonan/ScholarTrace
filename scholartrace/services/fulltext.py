@@ -1,30 +1,29 @@
-"""Full-text acquisition cascade service.
-
-Tries multiple sources in order to obtain full text for a Work:
-1. arXiv HTML
-2. arXiv PDF
-3. OA / pdf_url from metadata
-4. Fall back to abstract-only
-"""
+"""Full-text acquisition service with explicit cache and acquire semantics."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
+import socket
 import uuid
-from datetime import datetime
-
-import httpx
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import fitz
+import httpx
+from bs4 import BeautifulSoup
 
 from scholartrace.config import Settings
 from scholartrace.models.schemas import (
     AccessStatus,
+    AcquisitionState,
     Artifact,
     ArtifactKind,
+    FullTextState,
     Section,
     Work,
 )
@@ -33,31 +32,89 @@ from scholartrace.services.storage import StorageService
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 30.0
+_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+_MAX_REDIRECTS = 3
+_NEGATIVE_CACHE_TTL = timedelta(minutes=15)
+_ACQUIRE_SEMAPHORE = asyncio.Semaphore(4)
+_INFLIGHT_ACQUIRES: dict[str, asyncio.Task[Work]] = {}
+_INFLIGHT_LOCK = asyncio.Lock()
 
 
-# ------------------------------------------------------------------
-# Internal helpers
-# ------------------------------------------------------------------
-async def _fetch_html(url: str, client: httpx.AsyncClient) -> str | None:
-    """Fetch HTML content from *url*. Returns ``None`` on any error."""
+class FullTextFetchRejected(Exception):
+    """Raised when a target URL or response is unsafe for acquisition."""
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _resolve_settings(settings: Settings | None) -> Settings:
+    return settings if settings is not None else Settings()
+
+
+def _redact_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def _is_public_ip(address: str) -> bool:
     try:
-        resp = await client.get(url, follow_redirects=True)
-        resp.raise_for_status()
-        return resp.text
-    except Exception:
-        logger.debug("HTML fetch failed for %s", url, exc_info=True)
-        return None
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return ip.is_global
 
 
-async def _fetch_pdf(url: str, client: httpx.AsyncClient) -> bytes | None:
-    """Fetch PDF bytes from *url*. Returns ``None`` on any error."""
+def _resolve_host_addresses(host: str) -> set[str]:
     try:
-        resp = await client.get(url, follow_redirects=True)
-        resp.raise_for_status()
-        return resp.content
-    except Exception:
-        logger.debug("PDF fetch failed for %s", url, exc_info=True)
-        return None
+        return {
+            result[4][0]
+            for result in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise FullTextFetchRejected("unresolvable host") from exc
+
+
+def _validate_outbound_url(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"}:
+        raise FullTextFetchRejected("unsupported scheme")
+    if not parts.hostname:
+        raise FullTextFetchRejected("missing host")
+    host = parts.hostname
+    if host.lower() == "localhost":
+        raise FullTextFetchRejected("loopback host")
+    try:
+        ip = ipaddress.ip_address(host)
+        if not ip.is_global:
+            raise FullTextFetchRejected("non-public address")
+    except ValueError:
+        addresses = _resolve_host_addresses(host)
+        if not addresses or any(not _is_public_ip(address) for address in addresses):
+            raise FullTextFetchRejected("non-public address")
+    return url
+
+
+async def _download_response(
+    url: str,
+    client: httpx.AsyncClient,
+) -> tuple[object, str]:
+    current_url = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        safe_url = _validate_outbound_url(current_url)
+        response = await client.get(safe_url, follow_redirects=False)
+        if 300 <= response.status_code < 400:
+            location = (getattr(response, "headers", {}) or {}).get("location")
+            if not location:
+                raise FullTextFetchRejected("redirect missing location")
+            current_url = urljoin(safe_url, location)
+            continue
+        response.raise_for_status()
+        content = getattr(response, "content", b"")
+        if len(content) > _MAX_DOWNLOAD_BYTES:
+            raise FullTextFetchRejected("response too large")
+        return response, safe_url
+    raise FullTextFetchRejected("too many redirects")
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -74,26 +131,17 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
 
 
 def _parse_html_sections(html: str) -> list[tuple[str, str]]:
-    """Parse HTML into ``(title, content)`` pairs by scanning heading tags.
-
-    Any content before the first heading is grouped under a synthetic
-    section titled ``"Preamble"``.
-    """
+    """Parse HTML into ``(title, content)`` pairs by scanning heading tags."""
     soup = BeautifulSoup(html, "html.parser")
-
-    # Collect all heading and content elements in document order.
     headings = soup.find_all(["h1", "h2", "h3"])
-
     sections: list[tuple[str, str]] = []
 
     if not headings:
-        # No headings at all -- return the full text as a single section.
         full_text = soup.get_text(separator="\n", strip=True)
         if full_text.strip():
             sections.append(("Full Text", full_text))
         return sections
 
-    # Capture any content before the first heading.
     first_heading = headings[0]
     preamble_parts: list[str] = []
     for sibling in first_heading.previous_siblings:
@@ -105,7 +153,6 @@ def _parse_html_sections(html: str) -> list[tuple[str, str]]:
     if preamble:
         sections.append(("Preamble", preamble))
 
-    # For each heading, gather following siblings until the next heading.
     for idx, heading in enumerate(headings):
         title = heading.get_text(strip=True) or f"Section {idx}"
         content_parts: list[str] = []
@@ -113,8 +160,7 @@ def _parse_html_sections(html: str) -> list[tuple[str, str]]:
             if sibling in headings:
                 break
             if hasattr(sibling, "get_text"):
-                content_parts.append(sibling.get_text(
-                    separator="\n", strip=True))
+                content_parts.append(sibling.get_text(separator="\n", strip=True))
             elif isinstance(sibling, str) and sibling.strip():
                 content_parts.append(sibling.strip())
         content = "\n".join(content_parts).strip()
@@ -124,10 +170,6 @@ def _parse_html_sections(html: str) -> list[tuple[str, str]]:
     return sections
 
 
-def _resolve_settings(settings: Settings | None) -> Settings:
-    return settings if settings is not None else Settings()
-
-
 def _save_artifact(
     work_id: str,
     kind: ArtifactKind,
@@ -135,36 +177,29 @@ def _save_artifact(
     source_url: str,
     storage: StorageService,
     settings: Settings,
+    *,
+    conn,
 ) -> Artifact:
-    """Persist an artifact to disk and to the database."""
     ext = "html" if kind == ArtifactKind.HTML else "txt" if kind == ArtifactKind.PARSED_TEXT else "pdf"
     raw_dir = settings.data_dir / "artifacts" / "raw"
     parsed_dir = settings.data_dir / "artifacts" / "parsed"
-
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save raw artifact.
-    raw_path = raw_dir / f"{work_id}.{ext}"
-    if isinstance(content, bytes):
-        raw_path.write_bytes(content)
-        sha = hashlib.sha256(content).hexdigest()
-    else:
-        raw_bytes = content.encode("utf-8")
-        raw_path.write_bytes(raw_bytes)
-        sha = hashlib.sha256(raw_bytes).hexdigest()
-
+    raw_path = raw_dir / f"{work_id}_{kind.value}.{ext}"
+    raw_bytes = content.encode("utf-8") if isinstance(content, str) else content
+    raw_path.write_bytes(raw_bytes)
     artifact = Artifact(
         id=str(uuid.uuid4()),
         work_id=work_id,
         kind=kind,
         source_url=source_url,
         local_path=str(raw_path),
-        sha256=sha,
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
         access_status=AccessStatus.AVAILABLE,
-        created_at=datetime.utcnow(),
+        created_at=_utcnow(),
     )
-    storage.save_artifact(artifact)
+    storage.save_artifact(artifact, conn=conn)
     return artifact
 
 
@@ -174,30 +209,29 @@ def _save_sections(
     sections: list[tuple[str, str]],
     storage: StorageService,
     settings: Settings,
+    *,
+    conn,
 ) -> list[Section]:
-    """Persist extracted sections to disk and database."""
     sections_dir = settings.data_dir / "artifacts" / "sections"
     sections_dir.mkdir(parents=True, exist_ok=True)
 
     saved: list[Section] = []
-    for i, (title, text) in enumerate(sections):
-        section_path = sections_dir / f"{work_id}_section_{i}.json"
+    for index, (title, text) in enumerate(sections):
+        section_path = sections_dir / f"{work_id}_section_{index}.json"
         section_path.write_text(
-            json.dumps({"title": title, "text": text},
-                       ensure_ascii=False, indent=2)
+            json.dumps({"title": title, "text": text}, ensure_ascii=False, indent=2)
         )
-
-        sec = Section(
+        section = Section(
             id=str(uuid.uuid4()),
             work_id=work_id,
             artifact_id=artifact_id,
             section_title=title,
-            section_order=i,
+            section_order=index,
             text_content=text,
-            created_at=datetime.utcnow(),
+            created_at=_utcnow(),
         )
-        storage.save_section(sec)
-        saved.append(sec)
+        storage.save_section(section, conn=conn)
+        saved.append(section)
     return saved
 
 
@@ -206,15 +240,14 @@ def _save_parsed_text(
     text: str,
     storage: StorageService,
     settings: Settings,
+    *,
+    conn,
 ) -> Artifact:
-    """Save the concatenated parsed text as a PARSED_TEXT artifact."""
     parsed_dir = settings.data_dir / "artifacts" / "parsed"
     parsed_dir.mkdir(parents=True, exist_ok=True)
-
     parsed_path = parsed_dir / f"{work_id}.txt"
     parsed_bytes = text.encode("utf-8")
     parsed_path.write_bytes(parsed_bytes)
-
     artifact = Artifact(
         id=str(uuid.uuid4()),
         work_id=work_id,
@@ -222,98 +255,340 @@ def _save_parsed_text(
         local_path=str(parsed_path),
         sha256=hashlib.sha256(parsed_bytes).hexdigest(),
         access_status=AccessStatus.AVAILABLE,
-        created_at=datetime.utcnow(),
+        created_at=_utcnow(),
     )
-    storage.save_artifact(artifact)
+    storage.save_artifact(artifact, conn=conn)
     return artifact
 
 
-# ------------------------------------------------------------------
-# Main cascade
-# ------------------------------------------------------------------
+def _make_fulltext_state(
+    work_id: str,
+    acquisition_state: AcquisitionState,
+    *,
+    last_attempt_at: datetime | None = None,
+    next_retry_at: datetime | None = None,
+    error_message: str | None = None,
+) -> FullTextState:
+    return FullTextState(
+        work_id=work_id,
+        acquisition_state=acquisition_state,
+        last_attempt_at=last_attempt_at,
+        next_retry_at=next_retry_at,
+        error_message=error_message,
+        updated_at=_utcnow(),
+    )
+
+
+def _persist_negative_cache(
+    work: Work,
+    storage: StorageService,
+    error_message: str,
+) -> Work:
+    now = _utcnow()
+    work.fulltext_available = False
+    work.access_status = AccessStatus.ABSTRACT_ONLY
+    work.updated_at = now
+    with storage.transaction(immediate=True) as conn:
+        saved_work = storage.save_work(work, conn=conn)
+        storage.save_fulltext_state(
+            _make_fulltext_state(
+                work.id,
+                AcquisitionState.NEGATIVE_CACHED,
+                last_attempt_at=now,
+                next_retry_at=now + _NEGATIVE_CACHE_TTL,
+                error_message=error_message,
+            ),
+            conn=conn,
+        )
+        return saved_work
+
+
+def _persist_available_text(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+    *,
+    kind: ArtifactKind,
+    content: bytes | str,
+    source_url: str,
+    sections: list[tuple[str, str]] | None = None,
+    parsed_text: str,
+) -> Work:
+    now = _utcnow()
+    work.fulltext_available = True
+    work.access_status = AccessStatus.AVAILABLE
+    work.updated_at = now
+    with storage.transaction(immediate=True) as conn:
+        artifact = _save_artifact(
+            work.id,
+            kind,
+            content,
+            source_url,
+            storage,
+            settings,
+            conn=conn,
+        )
+        _save_parsed_text(work.id, parsed_text, storage, settings, conn=conn)
+        if sections:
+            _save_sections(work.id, artifact.id, sections, storage, settings, conn=conn)
+        saved_work = storage.save_work(work, conn=conn)
+        storage.save_fulltext_state(
+            _make_fulltext_state(
+                work.id,
+                AcquisitionState.AVAILABLE,
+                last_attempt_at=now,
+                next_retry_at=None,
+                error_message=None,
+            ),
+            conn=conn,
+        )
+        return saved_work
+
+
+def _load_parsed_text(work_id: str, storage: StorageService) -> str | None:
+    artifacts = storage.get_artifacts_by_work(work_id)
+    for artifact in artifacts:
+        if artifact.kind != ArtifactKind.PARSED_TEXT or not artifact.local_path:
+            continue
+        path = Path(artifact.local_path)
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    return None
+
+
+def _artifact_payload(artifact: Artifact) -> dict:
+    return {
+        "id": artifact.id,
+        "kind": artifact.kind.value,
+        "source_url": artifact.source_url,
+        "access_status": artifact.access_status.value,
+    }
+
+
+def _section_payload(section: Section) -> dict:
+    return {
+        "id": section.id,
+        "section_title": section.section_title,
+        "section_order": section.section_order,
+        "text_content": section.text_content,
+    }
+
+
+def read_cached_fulltext(
+    work: Work,
+    storage: StorageService,
+    settings: Settings | None = None,
+) -> dict:
+    settings = _resolve_settings(settings)
+    current = storage.get_work(work.id) or work
+    state = storage.get_fulltext_state(current.id)
+    if state is None:
+        acquisition_state = (
+            AcquisitionState.AVAILABLE if current.fulltext_available else AcquisitionState.MISSING
+        )
+        state = _make_fulltext_state(current.id, acquisition_state)
+    artifacts = storage.get_artifacts_by_work(current.id)
+    sections = storage.get_sections_by_work(current.id)
+    parsed_text = _load_parsed_text(current.id, storage)
+    now = _utcnow()
+    needs_acquisition = (
+        not current.fulltext_available
+        and state.acquisition_state != AcquisitionState.ACQUIRING
+        and (state.next_retry_at is None or state.next_retry_at <= now)
+    )
+    return {
+        "paper_id": current.id,
+        "title": current.title,
+        "fulltext_available": current.fulltext_available,
+        "access_status": current.access_status.value,
+        "acquisition_state": state.acquisition_state.value,
+        "needs_acquisition": needs_acquisition,
+        "last_attempt_at": state.last_attempt_at.isoformat() if state.last_attempt_at else None,
+        "next_retry_at": state.next_retry_at.isoformat() if state.next_retry_at else None,
+        "error_message": state.error_message,
+        "artifacts": [_artifact_payload(artifact) for artifact in artifacts],
+        "sections": [_section_payload(section) for section in sections],
+        "parsed_text": parsed_text,
+    }
+
+
+async def _attempt_html_acquisition(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> Work | None:
+    if not work.arxiv_id:
+        return None
+    html_url = f"https://arxiv.org/html/{work.arxiv_id}"
+    response, safe_url = await _download_response(html_url, client)
+    html = response.text
+    sections = _parse_html_sections(html)
+    if not sections:
+        return None
+    full_text = "\n\n".join(content for _, content in sections)
+    return _persist_available_text(
+        work,
+        storage,
+        settings,
+        kind=ArtifactKind.HTML,
+        content=html,
+        source_url=safe_url,
+        sections=sections,
+        parsed_text=full_text,
+    )
+
+
+async def _attempt_pdf_acquisition(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+    client: httpx.AsyncClient,
+    url: str,
+) -> Work | None:
+    response, safe_url = await _download_response(url, client)
+    pdf_bytes = response.content
+    text = _extract_pdf_text(pdf_bytes)
+    if not text.strip():
+        return None
+    return _persist_available_text(
+        work,
+        storage,
+        settings,
+        kind=ArtifactKind.PDF,
+        content=pdf_bytes,
+        source_url=safe_url,
+        parsed_text=text,
+    )
+
+
+async def _acquire_fulltext_inner(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+) -> Work:
+    current = storage.get_work(work.id) or work
+    state = storage.get_fulltext_state(current.id)
+    now = _utcnow()
+
+    if current.fulltext_available:
+        if state is None or state.acquisition_state != AcquisitionState.AVAILABLE:
+            with storage.transaction(immediate=True) as conn:
+                storage.save_fulltext_state(
+                    _make_fulltext_state(
+                        current.id,
+                        AcquisitionState.AVAILABLE,
+                        last_attempt_at=now,
+                    ),
+                    conn=conn,
+                )
+        return current
+
+    if (
+        state is not None
+        and state.acquisition_state == AcquisitionState.NEGATIVE_CACHED
+        and state.next_retry_at is not None
+        and state.next_retry_at > now
+    ):
+        logger.info(
+            "Negative-cache hit for full-text acquisition on %s until %s",
+            current.id,
+            state.next_retry_at.isoformat(),
+        )
+        return current
+
+    with storage.transaction(immediate=True) as conn:
+        storage.save_fulltext_state(
+            _make_fulltext_state(
+                current.id,
+                AcquisitionState.ACQUIRING,
+                last_attempt_at=now,
+            ),
+            conn=conn,
+        )
+
+    async with _ACQUIRE_SEMAPHORE:
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                if current.arxiv_id:
+                    try:
+                        result = await _attempt_html_acquisition(current, storage, settings, client)
+                        if result is not None:
+                            return result
+                    except FullTextFetchRejected as exc:
+                        logger.warning(
+                            "Blocked unsafe full-text fetch for %s via %s: %s",
+                            current.id,
+                            _redact_url(f"https://arxiv.org/html/{current.arxiv_id}"),
+                            exc,
+                        )
+                    except Exception:
+                        logger.debug("HTML acquisition failed for %s", current.id, exc_info=True)
+
+                    try:
+                        result = await _attempt_pdf_acquisition(
+                            current,
+                            storage,
+                            settings,
+                            client,
+                            f"https://arxiv.org/pdf/{current.arxiv_id}",
+                        )
+                        if result is not None:
+                            return result
+                    except FullTextFetchRejected as exc:
+                        logger.warning(
+                            "Blocked unsafe full-text fetch for %s via %s: %s",
+                            current.id,
+                            _redact_url(f"https://arxiv.org/pdf/{current.arxiv_id}"),
+                            exc,
+                        )
+                    except Exception:
+                        logger.debug("arXiv PDF acquisition failed for %s", current.id, exc_info=True)
+
+                if current.pdf_url:
+                    try:
+                        result = await _attempt_pdf_acquisition(
+                            current,
+                            storage,
+                            settings,
+                            client,
+                            current.pdf_url,
+                        )
+                        if result is not None:
+                            return result
+                    except FullTextFetchRejected as exc:
+                        logger.warning(
+                            "Blocked unsafe full-text fetch for %s via %s: %s",
+                            current.id,
+                            _redact_url(current.pdf_url),
+                            exc,
+                        )
+                    except Exception:
+                        logger.debug("Metadata PDF acquisition failed for %s", current.id, exc_info=True)
+        except Exception:
+            logger.warning("Full-text acquisition failed for %s", current.id, exc_info=True)
+
+    logger.warning("Negative-caching full-text miss for %s", current.id)
+    return _persist_negative_cache(current, storage, "Full-text source unavailable")
+
+
 async def acquire_fulltext(
     work: Work,
     storage: StorageService,
     settings: Settings | None = None,
 ) -> Work:
-    """Attempt to acquire full text for *work* via a cascade of sources.
-
-    Returns the updated ``Work`` object (also persisted via *storage*).
-    """
-    settings = _resolve_settings(settings)
-    updated = work.updated_at = datetime.utcnow()
-
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        # ----------------------------------------------------------
-        # 1. arXiv HTML
-        # ----------------------------------------------------------
-        if work.arxiv_id:
-            html_url = f"https://arxiv.org/html/{work.arxiv_id}"
-            html = await _fetch_html(html_url, client)
-            if html:
-                sections = _parse_html_sections(html)
-                if sections:
-                    # Save raw HTML artifact.
-                    html_artifact = _save_artifact(
-                        work.id, ArtifactKind.HTML, html, html_url, storage, settings
-                    )
-                    # Save parsed text.
-                    full_text = "\n\n".join(content for _, content in sections)
-                    _save_parsed_text(work.id, full_text, storage, settings)
-                    # Save individual sections.
-                    _save_sections(work.id, html_artifact.id,
-                                   sections, storage, settings)
-
-                    work.fulltext_available = True
-                    work.access_status = AccessStatus.AVAILABLE
-                    work.updated_at = datetime.utcnow()
-                    storage.save_work(work)
-                    return work
-
-        # ----------------------------------------------------------
-        # 2. arXiv PDF
-        # ----------------------------------------------------------
-        if work.arxiv_id:
-            pdf_url = f"https://arxiv.org/pdf/{work.arxiv_id}"
-            pdf_bytes = await _fetch_pdf(pdf_url, client)
-            if pdf_bytes:
-                text = _extract_pdf_text(pdf_bytes)
-                if text.strip():
-                    _save_artifact(
-                        work.id, ArtifactKind.PDF, pdf_bytes, pdf_url, storage, settings
-                    )
-                    _save_parsed_text(work.id, text, storage, settings)
-
-                    work.fulltext_available = True
-                    work.access_status = AccessStatus.AVAILABLE
-                    work.updated_at = datetime.utcnow()
-                    storage.save_work(work)
-                    return work
-
-        # ----------------------------------------------------------
-        # 3. OA / pdf_url from metadata
-        # ----------------------------------------------------------
-        if work.pdf_url:
-            pdf_bytes = await _fetch_pdf(work.pdf_url, client)
-            if pdf_bytes:
-                text = _extract_pdf_text(pdf_bytes)
-                if text.strip():
-                    _save_artifact(
-                        work.id, ArtifactKind.PDF, pdf_bytes, work.pdf_url, storage, settings
-                    )
-                    _save_parsed_text(work.id, text, storage, settings)
-
-                    work.fulltext_available = True
-                    work.access_status = AccessStatus.AVAILABLE
-                    work.updated_at = datetime.utcnow()
-                    storage.save_work(work)
-                    return work
-
-    # ----------------------------------------------------------
-    # 4. Abstract-only fallback
-    # ----------------------------------------------------------
-    work.fulltext_available = False
-    work.access_status = AccessStatus.ABSTRACT_ONLY
-    work.updated_at = datetime.utcnow()
-    storage.save_work(work)
-    return work
+    """Explicitly acquire full text for *work* when cache state allows it."""
+    resolved_settings = _resolve_settings(settings)
+    async with _INFLIGHT_LOCK:
+        task = _INFLIGHT_ACQUIRES.get(work.id)
+        if task is None:
+            task = asyncio.create_task(_acquire_fulltext_inner(work, storage, resolved_settings))
+            _INFLIGHT_ACQUIRES[work.id] = task
+        else:
+            logger.info("Collapsing duplicate full-text acquisition for %s", work.id)
+    try:
+        return await task
+    finally:
+        async with _INFLIGHT_LOCK:
+            if _INFLIGHT_ACQUIRES.get(work.id) is task and task.done():
+                _INFLIGHT_ACQUIRES.pop(work.id, None)

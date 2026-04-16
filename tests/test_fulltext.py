@@ -12,6 +12,7 @@ import pytest
 from scholartrace.config import Settings
 from scholartrace.models.schemas import (
     AccessStatus,
+    AcquisitionState,
     ArtifactKind,
     Work,
 )
@@ -19,6 +20,7 @@ from scholartrace.services.fulltext import (
     _extract_pdf_text,
     _parse_html_sections,
     acquire_fulltext,
+    read_cached_fulltext,
 )
 from scholartrace.services.storage import StorageService
 
@@ -73,7 +75,12 @@ def settings(tmp_path):
 class _FakeResponse:
     """A synchronous fake response that does not involve unittest.mock."""
 
-    def __init__(self, content: bytes | str, status_code: int = 200):
+    def __init__(
+        self,
+        content: bytes | str,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ):
         if isinstance(content, str):
             self._text = content
             self.content = content.encode("utf-8")
@@ -81,6 +88,7 @@ class _FakeResponse:
             self.content = content
             self._text = content.decode("utf-8", errors="replace")
         self.status_code = status_code
+        self.headers = headers or {}
 
     @property
     def text(self) -> str:
@@ -113,13 +121,31 @@ class _FakeClient:
                 request=httpx.Request("GET", url),
                 response=httpx.Response(404),
             )
-        return _FakeResponse(self._responses[url])
+        response = self._responses[url]
+        if isinstance(response, _FakeResponse):
+            return response
+        return _FakeResponse(response)
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *args):
         pass
+
+
+class _CountingClient(_FakeClient):
+    def __init__(self, *args, delay: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+        self._delay = delay
+
+    async def get(self, url: str, **kwargs):
+        import asyncio
+
+        self.calls.append(url)
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return await super().get(url, **kwargs)
 
 
 # ------------------------------------------------------------------
@@ -249,6 +275,9 @@ class TestAbstractOnlyFallback:
 
         assert result.fulltext_available is False
         assert result.access_status == AccessStatus.ABSTRACT_ONLY
+        state = storage.get_fulltext_state(work.id)
+        assert state is not None
+        assert state.acquisition_state == AcquisitionState.NEGATIVE_CACHED
 
 
 class TestNetworkErrorHandling:
@@ -300,3 +329,100 @@ class TestEmptyPdfText:
 
         assert result.fulltext_available is False
         assert result.access_status == AccessStatus.ABSTRACT_ONLY
+
+
+class TestHardening:
+    @pytest.mark.asyncio
+    async def test_ssrf_blocked_and_logged(self, storage, settings, caplog):
+        work = Work(title="SSRF Paper", pdf_url="http://127.0.0.1:8080/private.pdf")
+        storage.save_work(work)
+
+        class _NeverCalledClient:
+            async def get(self, url, **kwargs):
+                raise AssertionError("network fetch should not be attempted for blocked targets")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=_NeverCalledClient()):
+            result = await acquire_fulltext(work, storage, settings)
+
+        assert result.fulltext_available is False
+        state = storage.get_fulltext_state(work.id)
+        assert state is not None
+        assert state.acquisition_state == AcquisitionState.NEGATIVE_CACHED
+        assert "Blocked unsafe full-text fetch" in caplog.text
+        assert "127.0.0.1:8080" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_redirect_to_private_host_is_blocked(self, storage, settings, caplog):
+        pdf_url = "https://example.com/paper.pdf"
+        work = Work(title="Redirect Paper", pdf_url=pdf_url)
+        storage.save_work(work)
+
+        fake = _CountingClient(
+            responses={
+                pdf_url: _FakeResponse(
+                    "",
+                    status_code=302,
+                    headers={"location": "http://127.0.0.1:9000/secret.pdf"},
+                ),
+            }
+        )
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            result = await acquire_fulltext(work, storage, settings)
+
+        assert result.fulltext_available is False
+        assert fake.calls == [pdf_url]
+        assert "Blocked unsafe full-text fetch" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_negative_cache_skips_repeat_fetch(self, storage, settings):
+        pdf_url = "https://example.com/missing.pdf"
+        work = Work(title="Negative Cache Paper", pdf_url=pdf_url)
+        storage.save_work(work)
+
+        fake = _CountingClient()
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            first = await acquire_fulltext(work, storage, settings)
+            second = await acquire_fulltext(first, storage, settings)
+
+        assert first.fulltext_available is False
+        assert second.fulltext_available is False
+        assert fake.calls == [pdf_url]
+        state = storage.get_fulltext_state(work.id)
+        assert state is not None
+        assert state.acquisition_state == AcquisitionState.NEGATIVE_CACHED
+        assert state.next_retry_at is not None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquire_requests_collapse_to_one_fetch(self, storage, settings):
+        pdf_url = "https://example.com/collapse.pdf"
+        work = Work(title="Collapse Paper", pdf_url=pdf_url)
+        storage.save_work(work)
+
+        pdf_bytes = _make_pdf_bytes("Collapsed download")
+        fake = _CountingClient(responses={pdf_url: pdf_bytes}, delay=0.05)
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            results = await __import__("asyncio").gather(
+                acquire_fulltext(work, storage, settings),
+                acquire_fulltext(work, storage, settings),
+            )
+
+        assert all(result.fulltext_available for result in results)
+        assert fake.calls == [pdf_url]
+
+    def test_read_cached_fulltext_reports_missing_without_network(self, storage, settings):
+        work = Work(title="Cache Only")
+        storage.save_work(work)
+
+        payload = read_cached_fulltext(work, storage, settings)
+        assert payload["fulltext_available"] is False
+        assert payload["acquisition_state"] == AcquisitionState.MISSING.value
+        assert payload["needs_acquisition"] is True

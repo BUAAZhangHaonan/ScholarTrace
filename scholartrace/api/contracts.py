@@ -45,7 +45,7 @@ def safe_http_exception_response(exc: HTTPException) -> JSONResponse:
         exc.status_code,
         code,
         detail,
-        retryable=exc.status_code >= 500,
+        retryable=exc.status_code >= 500 or exc.status_code == 429,
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scholartrace.api.rest import app
 from scholartrace.models.schemas import AccessStatus, Artifact, ArtifactKind, Work, Theme
+from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
 
@@ -23,6 +25,13 @@ def _reset_module_singletons():
     yield
     rest_module._storage = None
     rest_module._settings = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_budgets():
+    asyncio.run(runtime_limits.budget_manager.reset())
+    yield
+    asyncio.run(runtime_limits.budget_manager.reset())
 
 
 @pytest.fixture
@@ -219,3 +228,92 @@ def test_fulltext_response_redacts_local_path(client: TestClient):
     data = resp.json()
     assert data["artifacts"][0]["source_url"] == "https://example.com/paper.pdf"
     assert "local_path" not in data["artifacts"][0]
+
+
+def test_fulltext_get_is_cache_only_and_reports_missing_state(client: TestClient):
+    import scholartrace.api.rest as rest_module
+
+    work = Work(title="Cache Only REST", pdf_url="https://example.com/paper.pdf")
+    rest_module._storage.save_work(work)
+
+    resp = client.get(f"/papers/{work.id}/fulltext")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fulltext_available"] is False
+    assert data["acquisition_state"] == "missing"
+    assert data["needs_acquisition"] is True
+
+
+def test_fulltext_acquire_endpoint_uses_explicit_service_call(client: TestClient):
+    import scholartrace.api.rest as rest_module
+
+    work = Work(title="Acquire REST", pdf_url="https://example.com/paper.pdf")
+    rest_module._storage.save_work(work)
+
+    async def _fake_acquire(target_work, storage, settings):
+        target_work.fulltext_available = True
+        target_work.access_status = AccessStatus.AVAILABLE
+        storage.save_work(target_work)
+        return target_work
+
+    with patch("scholartrace.services.fulltext.acquire_fulltext", new=_fake_acquire):
+        resp = client.post(f"/papers/{work.id}/fulltext/acquire")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fulltext_available"] is True
+    assert data["acquisition_state"] == "available"
+    assert data["needs_acquisition"] is False
+
+
+def test_fulltext_acquire_rate_limit_returns_safe_429(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    import scholartrace.api.rest as rest_module
+
+    work_one = Work(title="One", pdf_url="https://example.com/one.pdf")
+    work_two = Work(title="Two", pdf_url="https://example.com/two.pdf")
+    rest_module._storage.save_work(work_one)
+    rest_module._storage.save_work(work_two)
+
+    monkeypatch.setattr(
+        runtime_limits,
+        "FULLTEXT_ACQUIRE_POLICY",
+        runtime_limits.BudgetPolicy("fulltext_acquire", limit=1, window_seconds=60, concurrency=4),
+    )
+
+    async def _fake_acquire(target_work, storage, settings):
+        return target_work
+
+    with patch("scholartrace.services.fulltext.acquire_fulltext", new=_fake_acquire):
+        first = client.post(f"/papers/{work_one.id}/fulltext/acquire")
+        second = client.post(f"/papers/{work_two.id}/fulltext/acquire")
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    payload = second.json()
+    assert payload["error"]["code"] == "rate_limited"
+    assert "fulltext_acquire rate limit exceeded" in payload["error"]["message"]
+    assert payload["error"]["retryable"] is True
+
+
+def test_retrieval_job_rate_limit_returns_safe_429(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    import scholartrace.api.rest as rest_module
+
+    theme_one = _make_theme(rest_module._storage, text="theme one")
+    theme_two = _make_theme(rest_module._storage, text="theme two")
+
+    monkeypatch.setattr(
+        runtime_limits,
+        "RETRIEVAL_JOB_POLICY",
+        runtime_limits.BudgetPolicy("retrieval_job", limit=1, window_seconds=60, concurrency=2),
+    )
+
+    with patch(
+        "scholartrace.services.retrieval.run_retrieval",
+        new=AsyncMock(return_value=[]),
+    ):
+        first = client.post("/retrieval/jobs", data={"theme_id": theme_one.id})
+        second = client.post("/retrieval/jobs", data={"theme_id": theme_two.id})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "rate_limited"

@@ -38,6 +38,13 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+class AcquisitionState(str, Enum):
+    MISSING = "missing"
+    ACQUIRING = "acquiring"
+    AVAILABLE = "available"
+    NEGATIVE_CACHED = "negative_cached"
+
+
 class Work(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     doi: str | None = None
@@ -111,6 +118,15 @@ class RetrievalJob(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
+
+
+class FullTextState(BaseModel):
+    work_id: str = ""
+    acquisition_state: AcquisitionState = AcquisitionState.MISSING
+    last_attempt_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    error_message: str | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class RawCandidate(BaseModel):

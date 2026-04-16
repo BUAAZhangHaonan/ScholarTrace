@@ -6,6 +6,7 @@ without going through MCP transport.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -18,6 +19,7 @@ from scholartrace.models.schemas import (
     Theme,
     Work,
 )
+from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
 
@@ -43,6 +45,13 @@ def _inject_storage(test_storage):
     mod.set_storage(test_storage)
     yield
     mod._storage = prev
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_budgets():
+    asyncio.run(runtime_limits.budget_manager.reset())
+    yield
+    asyncio.run(runtime_limits.budget_manager.reset())
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +219,37 @@ async def test_get_paper_fulltext(test_storage):
     work = _make_work(fulltext_available=False)
     test_storage.save_work(work)
 
-    # Mock acquire_fulltext to avoid real HTTP calls
-    with patch(
-        "scholartrace.services.fulltext.acquire_fulltext",
-        new=AsyncMock(return_value=work),
-    ):
-        result_str = await get_paper_fulltext(work.id)
+    result_str = await get_paper_fulltext(work.id)
 
     data = json.loads(result_str)
     assert data["paper_id"] == work.id
-    assert "fulltext_available" in data
-    assert "access_status" in data
+    assert data["fulltext_available"] is False
+    assert data["acquisition_state"] == "missing"
+    assert data["needs_acquisition"] is True
+
+
+@pytest.mark.asyncio
+async def test_acquire_paper_fulltext(test_storage):
+    from scholartrace.api.mcp_server import acquire_paper_fulltext
+
+    work = _make_work(fulltext_available=False)
+    test_storage.save_work(work)
+
+    async def _fake_acquire(target_work, storage, settings):
+        target_work.fulltext_available = True
+        test_storage.save_work(target_work)
+        return target_work
+
+    with patch(
+        "scholartrace.services.fulltext.acquire_fulltext",
+        new=_fake_acquire,
+    ):
+        result_str = await acquire_paper_fulltext(work.id)
+
+    data = json.loads(result_str)
+    assert data["fulltext_available"] is True
+    assert data["acquisition_state"] == "available"
+    assert data["needs_acquisition"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from scholartrace.api.security import (
 from scholartrace.config import Settings, get_settings
 from scholartrace.jobs.manager import JobManager
 from scholartrace.models.schemas import RetrievalJob, Theme, Work
+from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
 
@@ -53,6 +54,15 @@ def _get_storage() -> StorageService:
 def _get_settings() -> Settings:
     _get_storage()  # ensures _settings is populated
     return _settings  # type: ignore[return-value]
+
+
+def _client_budget_key(request: Request) -> str:
+    token = extract_access_token(request.headers)
+    if token:
+        return f"token:{token}"
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+    return "local"
 
 
 @app.middleware("http")
@@ -107,7 +117,8 @@ def create_theme(text: str = Form(...)) -> Theme:
 # Retrieval jobs
 # ---------------------------------------------------------------------------
 @app.post("/retrieval/jobs", response_model=RetrievalJob)
-def create_retrieval_job(
+async def create_retrieval_job(
+    request: Request,
     background_tasks: BackgroundTasks,
     theme_id: str = Form(...),
 ) -> RetrievalJob:
@@ -119,7 +130,25 @@ def create_retrieval_job(
         raise HTTPException(status_code=404, detail="Theme not found")
 
     job_manager = JobManager(storage)
-    job, created = job_manager.create_or_get_active_job(theme_id, return_created=True)
+    active = job_manager.get_active_job(theme_id)
+    if active is not None:
+        return active
+
+    if storage.count_active_jobs() >= runtime_limits.RETRIEVAL_JOB_POLICY.concurrency:
+        raise HTTPException(status_code=429, detail="Too many active retrieval jobs")
+
+    try:
+        async with runtime_limits.budget_manager.enforce(
+            runtime_limits.RETRIEVAL_JOB_POLICY,
+            _client_budget_key(request),
+        ):
+            job, created = job_manager.create_or_get_active_job(theme_id, return_created=True)
+    except runtime_limits.RateLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+        ) from exc
+
     if not created:
         return job
 
@@ -202,38 +231,29 @@ def get_fulltext(paper_id: str) -> dict:
     if work is None:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    artifacts = storage.get_artifacts_by_work(paper_id)
-    sections = storage.get_sections_by_work(paper_id)
+    from scholartrace.services.fulltext import read_cached_fulltext
 
-    artifact_list = []
-    for a in artifacts:
-        artifact_list.append(
-            {
-                "id": a.id,
-                "kind": a.kind.value,
-                "source_url": a.source_url,
-                "access_status": a.access_status.value,
-            }
-        )
+    return read_cached_fulltext(work, storage, _get_settings())
 
-    section_list = []
-    for s in sections:
-        section_list.append(
-            {
-                "id": s.id,
-                "section_title": s.section_title,
-                "section_order": s.section_order,
-                "text_content": s.text_content,
-            }
-        )
 
-    return {
-        "work_id": work.id,
-        "fulltext_available": work.fulltext_available,
-        "access_status": work.access_status.value,
-        "sections": section_list,
-        "artifacts": artifact_list,
-    }
+@app.post("/papers/{paper_id}/fulltext/acquire")
+async def acquire_fulltext_for_paper(request: Request, paper_id: str) -> dict:
+    storage = _get_storage()
+    work = storage.get_work(paper_id)
+    if work is None:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    from scholartrace.services.fulltext import acquire_fulltext, read_cached_fulltext
+
+    try:
+        async with runtime_limits.budget_manager.enforce(
+            runtime_limits.FULLTEXT_ACQUIRE_POLICY,
+            _client_budget_key(request),
+        ):
+            updated = await acquire_fulltext(work, storage, _get_settings())
+    except runtime_limits.RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return read_cached_fulltext(updated, storage, _get_settings())
 
 
 # ---------------------------------------------------------------------------
@@ -316,21 +336,29 @@ def _get_deepxiv_agent_rest() -> Any:
 
 @app.post("/deepxiv/search")
 async def deepxiv_search(
+    request: Request,
     query: str = Form(...),
     max_results: int = Form(default=20),
     search_mode: str = Form(default="hybrid"),
     categories: str = Form(default=""),
 ) -> dict:
     """Search arXiv papers via DeepXiv."""
-    connector = _get_deepxiv_rest()
-    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+    try:
+        async with runtime_limits.budget_manager.enforce(
+            runtime_limits.DEEPXIV_SEARCH_POLICY,
+            _client_budget_key(request),
+        ):
+            connector = _get_deepxiv_rest()
+            cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
 
-    candidates = await connector.search(
-        query,
-        max_results=min(max_results, 200),
-        search_mode=search_mode,
-        categories=cat_list,
-    )
+            candidates = await connector.search(
+                query,
+                max_results=min(max_results, 200),
+                search_mode=search_mode,
+                categories=cat_list,
+            )
+    except runtime_limits.RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     papers = []
     for c in candidates:
@@ -394,6 +422,7 @@ async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> dict:
 
 @app.post("/deepxiv/agent/filter")
 async def deepxiv_agent_filter(
+    request: Request,
     query: str = Form(...),
     max_results: int = Form(default=20),
     search_mode: str = Form(default="hybrid"),
@@ -402,28 +431,35 @@ async def deepxiv_agent_filter(
 
     Returns only the most relevant papers with scores and explanations.
     """
-    connector = _get_deepxiv_rest()
-    agent = _get_deepxiv_agent_rest()
+    try:
+        async with runtime_limits.budget_manager.enforce(
+            runtime_limits.AGENT_FILTER_POLICY,
+            _client_budget_key(request),
+        ):
+            connector = _get_deepxiv_rest()
+            agent = _get_deepxiv_agent_rest()
 
-    candidates = await connector.search(
-        query,
-        max_results=min(max_results, 200),
-        search_mode=search_mode,
-    )
+            candidates = await connector.search(
+                query,
+                max_results=min(max_results, 200),
+                search_mode=search_mode,
+            )
 
-    papers_for_agent = [
-        {
-            "title": c.title,
-            "abstract": c.abstract or "",
-            "arxiv_id": c.arxiv_id,
-            "authors": c.authors,
-            "year": c.year,
-            "citation_count": c.citation_count,
-        }
-        for c in candidates
-    ]
+            papers_for_agent = [
+                {
+                    "title": c.title,
+                    "abstract": c.abstract or "",
+                    "arxiv_id": c.arxiv_id,
+                    "authors": c.authors,
+                    "year": c.year,
+                    "citation_count": c.citation_count,
+                }
+                for c in candidates
+            ]
 
-    filtered = await agent.filter_papers(papers_for_agent, query)
+            filtered = await agent.filter_papers(papers_for_agent, query)
+    except runtime_limits.RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     return {
         "query": query,
