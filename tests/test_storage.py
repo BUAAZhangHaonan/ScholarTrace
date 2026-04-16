@@ -31,8 +31,6 @@ def storage():
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
-
-
 class TestInitDb:
     def test_init_db_creates_tables(self, storage):
         conn = storage._get_conn()
@@ -201,7 +199,8 @@ class TestThemeCRUD:
         assert fetched is not None
         assert fetched.document_text == "Find papers on transformer architectures."
         assert fetched.parsed_topics == ["transformers", "attention"]
-        assert fetched.parsed_methods == ["self-attention", "positional encoding"]
+        assert fetched.parsed_methods == [
+            "self-attention", "positional encoding"]
         assert fetched.parsed_datasets == ["WMT14", "WMT17"]
         assert fetched.parsed_queries == [
             "transformer architecture",

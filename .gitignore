@@ -7,4 +7,8 @@ build/
 *.egg
 .env
 *.db
-.pytest_cache
+*.db-shm
+*.db-wal
+.pytest_cache/
+.vscode/
+data/

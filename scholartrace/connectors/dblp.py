@@ -29,7 +29,6 @@ class DblpConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         first = 0
@@ -78,7 +77,6 @@ class DblpConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_info(info: dict[str, Any]) -> RawCandidate | None:
         title = info.get("title", "").strip()

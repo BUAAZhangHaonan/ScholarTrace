@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import xml.etree.ElementTree as ET
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -16,13 +14,12 @@ from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openalex import OpenAlexConnector, _reconstruct_abstract
 from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
-from scholartrace.models.schemas import RawCandidate, SourceName
+from scholartrace.models.schemas import SourceName
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
 def _mock_response(json_body: dict | None = None, text: str = "") -> httpx.Response:
     """Build a fake httpx.Response."""
     request = MagicMock()
@@ -52,8 +49,6 @@ def _settings() -> Settings:
 # ===========================================================================
 # OpenAlex
 # ===========================================================================
-
-
 class TestOpenAlexConnector:
     @pytest.fixture()
     def connector(self):
@@ -161,7 +156,8 @@ class TestOpenAlexConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: OpenAlexConnector):
         body = {"meta": {"next_cursor": None}, "results": []}
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("obscure query")
         assert results == []
@@ -191,7 +187,8 @@ class TestOpenAlexConnector:
                  "locations": [], "open_access": None, "type": "article"},
             ],
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert len(results) == 1
         assert results[0].title == "Valid"
@@ -215,7 +212,8 @@ class TestOpenAlexConnector:
                 },
             ],
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results[0].doi == "https://doi.org/10.1234/test"
 
@@ -238,7 +236,8 @@ class TestOpenAlexConnector:
                 },
             ],
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results[0].doi == "https://doi.org/10.1234/test"
 
@@ -246,8 +245,6 @@ class TestOpenAlexConnector:
 # ===========================================================================
 # arXiv
 # ===========================================================================
-
-
 def _arxiv_xml(entries: list[str]) -> str:
     """Wrap entry XML fragments in a full Atom feed."""
     entries_text = "\n".join(entries)
@@ -309,7 +306,8 @@ class TestArxivConnector:
                 pdf_url="https://arxiv.org/pdf/2301.12345v1",
             )
         ])
-        connector._client.get = AsyncMock(return_value=_mock_response(text=xml))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(text=xml))
 
         # Patch sleep to avoid delay in tests
         with patch("scholartrace.connectors.arxiv.asyncio.sleep", new_callable=AsyncMock):
@@ -330,9 +328,11 @@ class TestArxivConnector:
     async def test_search_pagination(self, connector: ArxivConnector):
         # Fill the first page so pagination continues (_PAGE_SIZE=200)
         from scholartrace.connectors.arxiv import _PAGE_SIZE
-        page1_entries = [_arxiv_entry(title=f"P1-{i}", arxiv_id=f"2301.{i:05d}v1") for i in range(_PAGE_SIZE)]
+        page1_entries = [_arxiv_entry(
+            title=f"P1-{i}", arxiv_id=f"2301.{i:05d}v1") for i in range(_PAGE_SIZE)]
         page1_xml = _arxiv_xml(page1_entries)
-        page2_xml = _arxiv_xml([_arxiv_entry(title="Paper 2", arxiv_id="2301.99999v1")])
+        page2_xml = _arxiv_xml(
+            [_arxiv_entry(title="Paper 2", arxiv_id="2301.99999v1")])
         connector._client.get = AsyncMock(
             side_effect=[
                 _mock_response(text=page1_xml),
@@ -349,14 +349,16 @@ class TestArxivConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: ArxivConnector):
         xml = _arxiv_xml([])
-        connector._client.get = AsyncMock(return_value=_mock_response(text=xml))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(text=xml))
         results = await connector.search("obscure")
         assert results == []
 
     @pytest.mark.asyncio
     async def test_arxiv_id_strips_version(self, connector: ArxivConnector):
         xml = _arxiv_xml([_arxiv_entry(arxiv_id="2403.00123v2")])
-        connector._client.get = AsyncMock(return_value=_mock_response(text=xml))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(text=xml))
         with patch("scholartrace.connectors.arxiv.asyncio.sleep", new_callable=AsyncMock):
             results = await connector.search("test", max_results=10)
         assert results[0].arxiv_id == "2403.00123"
@@ -373,7 +375,8 @@ class TestArxivConnector:
             "<author><name>Test</name></author>"
             "</entry>"
         ])
-        connector._client.get = AsyncMock(return_value=_mock_response(text=xml))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(text=xml))
         results = await connector.search("test")
         assert results == []
 
@@ -381,8 +384,6 @@ class TestArxivConnector:
 # ===========================================================================
 # Semantic Scholar
 # ===========================================================================
-
-
 class TestSemanticScholarConnector:
     @pytest.fixture()
     def connector(self):
@@ -416,7 +417,8 @@ class TestSemanticScholarConnector:
                 }
             ],
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("test query", max_results=10)
 
@@ -467,7 +469,8 @@ class TestSemanticScholarConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: SemanticScholarConnector):
         body = {"total": 0, "next": None, "data": []}
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("obscure")
         assert results == []
 
@@ -481,7 +484,8 @@ class TestSemanticScholarConnector:
                  "authors": [], "externalIds": {}},
             ],
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert len(results) == 1
         r = results[0]
@@ -494,8 +498,6 @@ class TestSemanticScholarConnector:
 # ===========================================================================
 # DBLP
 # ===========================================================================
-
-
 class TestDblpConnector:
     @pytest.fixture()
     def connector(self):
@@ -530,7 +532,8 @@ class TestDblpConnector:
                 }
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("database", max_results=10)
 
@@ -567,7 +570,8 @@ class TestDblpConnector:
                 }
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("solo")
         assert len(results) == 1
@@ -615,7 +619,8 @@ class TestDblpConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: DblpConnector):
         body = {"result": {"hits": {"@total": 0, "@sent": 0, "hit": []}}}
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("obscure")
         assert results == []
 
@@ -632,7 +637,8 @@ class TestDblpConnector:
                 }
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results == []
 
@@ -640,8 +646,6 @@ class TestDblpConnector:
 # ===========================================================================
 # OpenReview
 # ===========================================================================
-
-
 class TestOpenReviewConnector:
     @pytest.fixture()
     def connector(self):
@@ -663,7 +667,8 @@ class TestOpenReviewConnector:
                 }
             ]
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("test", max_results=10)
 
@@ -708,7 +713,8 @@ class TestOpenReviewConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: OpenReviewConnector):
         body = {"notes": []}
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("obscure")
         assert results == []
 
@@ -726,7 +732,8 @@ class TestOpenReviewConnector:
                 }
             ]
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results[0].authors == ["Single Author"]
 
@@ -743,7 +750,8 @@ class TestOpenReviewConnector:
                 }
             ]
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results == []
 
@@ -761,7 +769,8 @@ class TestOpenReviewConnector:
                 }
             ]
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results[0].venue == "ICLR 2024"
 
@@ -769,8 +778,6 @@ class TestOpenReviewConnector:
 # ===========================================================================
 # Crossref
 # ===========================================================================
-
-
 class TestCrossrefConnector:
     @pytest.fixture()
     def connector(self):
@@ -796,7 +803,8 @@ class TestCrossrefConnector:
                 ],
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
 
         results = await connector.search("test", max_results=10)
 
@@ -853,7 +861,8 @@ class TestCrossrefConnector:
     @pytest.mark.asyncio
     async def test_empty_results(self, connector: CrossrefConnector):
         body = {"message": {"next-cursor": None, "items": []}}
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("obscure")
         assert results == []
 
@@ -873,7 +882,8 @@ class TestCrossrefConnector:
                 ],
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results[0].year == 2023
 
@@ -893,7 +903,8 @@ class TestCrossrefConnector:
                 ],
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert "<jats:" not in results[0].abstract
         assert "Abstract" in results[0].abstract
@@ -908,6 +919,7 @@ class TestCrossrefConnector:
                 ],
             }
         }
-        connector._client.get = AsyncMock(return_value=_mock_response(json_body=body))
+        connector._client.get = AsyncMock(
+            return_value=_mock_response(json_body=body))
         results = await connector.search("test")
         assert results == []

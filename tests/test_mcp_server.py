@@ -24,8 +24,6 @@ from scholartrace.services.storage import StorageService
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def test_storage():
     """Create a temporary StorageService and initialise its schema."""
@@ -50,8 +48,6 @@ def _inject_storage(test_storage):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
 def _make_work(**overrides) -> Work:
     defaults = {
         "title": "Test Paper",
@@ -70,8 +66,6 @@ def _make_work(**overrides) -> Work:
 # ---------------------------------------------------------------------------
 # search_papers_by_theme
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_search_papers_by_theme(test_storage):
     from scholartrace.api.mcp_server import search_papers_by_theme
@@ -115,8 +109,6 @@ async def test_search_papers_by_theme(test_storage):
 # ---------------------------------------------------------------------------
 # get_ranked_papers
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_ranked_papers(test_storage):
     from scholartrace.api.mcp_server import get_ranked_papers
@@ -142,8 +134,6 @@ async def test_get_ranked_papers(test_storage):
 # ---------------------------------------------------------------------------
 # get_paper_metadata
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_paper_metadata(test_storage):
     from scholartrace.api.mcp_server import get_paper_metadata
@@ -172,8 +162,6 @@ async def test_get_paper_metadata_not_found(test_storage):
 # ---------------------------------------------------------------------------
 # get_paper_sections
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_paper_sections(test_storage):
     from scholartrace.api.mcp_server import get_paper_sections
@@ -209,8 +197,6 @@ async def test_get_paper_sections(test_storage):
 # ---------------------------------------------------------------------------
 # get_paper_fulltext
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_paper_fulltext(test_storage):
     from scholartrace.api.mcp_server import get_paper_fulltext
@@ -234,14 +220,13 @@ async def test_get_paper_fulltext(test_storage):
 # ---------------------------------------------------------------------------
 # get_related_papers
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_get_related_papers(test_storage):
     from scholartrace.api.mcp_server import get_related_papers
 
     # Seed paper
-    seed = _make_work(title="Seed Paper", year=2024, venue="NeurIPS", composite_score=0.9)
+    seed = _make_work(title="Seed Paper", year=2024,
+                      venue="NeurIPS", composite_score=0.9)
     test_storage.save_work(seed)
 
     # Related papers (same venue, close year)
@@ -274,8 +259,6 @@ async def test_get_related_papers(test_storage):
 # ---------------------------------------------------------------------------
 # export_theme_report
 # ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_export_theme_report_json(test_storage):
     from scholartrace.api.mcp_server import export_theme_report

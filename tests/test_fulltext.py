@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -12,9 +12,7 @@ import pytest
 from scholartrace.config import Settings
 from scholartrace.models.schemas import (
     AccessStatus,
-    Artifact,
     ArtifactKind,
-    Section,
     Work,
 )
 from scholartrace.services.fulltext import (
@@ -28,7 +26,6 @@ from scholartrace.services.storage import StorageService
 # ------------------------------------------------------------------
 # Fixtures
 # ------------------------------------------------------------------
-
 SAMPLE_HTML = """\
 <html>
 <body>
@@ -73,8 +70,6 @@ def settings(tmp_path):
 # ------------------------------------------------------------------
 # Helper: build a mock httpx.AsyncClient
 # ------------------------------------------------------------------
-
-
 class _FakeResponse:
     """A synchronous fake response that does not involve unittest.mock."""
 
@@ -130,8 +125,6 @@ class _FakeClient:
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
-
-
 class TestParseHtmlSections:
     def test_extracts_sections(self):
         sections = _parse_html_sections(SAMPLE_HTML)
@@ -270,8 +263,10 @@ class TestNetworkErrorHandling:
         class _ErrorClient:
             async def get(self, url, **kw):
                 raise httpx.ConnectError("connection refused")
+
             async def __aenter__(self):
                 return self
+
             async def __aexit__(self, *a):
                 pass
 

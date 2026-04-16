@@ -13,7 +13,6 @@ from scholartrace.models.schemas import (
     RawCandidate,
     SourceName,
     Theme,
-    Work,
 )
 from scholartrace.services.retrieval import (
     run_retrieval,
@@ -25,7 +24,6 @@ from scholartrace.services.storage import StorageService
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _make_candidate(
     title: str = "Test Paper",
     doi: str | None = None,
@@ -93,15 +91,14 @@ def _sample_theme() -> Theme:
         parsed_topics=["reinforcement learning", "human feedback"],
         parsed_methods=["RLHF"],
         parsed_datasets=[],
-        parsed_queries=["reinforcement learning human feedback", "RLHF reward model"],
+        parsed_queries=[
+            "reinforcement learning human feedback", "RLHF reward model"],
     )
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
 class TestJobLifecycle:
     """Test PENDING -> RUNNING -> COMPLETED / FAILED transitions."""
 
@@ -159,14 +156,18 @@ class TestRetrievalPipeline:
         theme = _sample_theme()
 
         oa_cands = [
-            _make_candidate("RLHF Paper", doi="10.1/a", openalex_id="W1", source=SourceName.OPENALEX, citation_count=50, year=2024),
-            _make_candidate("Reward Modeling", doi="10.1/b", openalex_id="W2", source=SourceName.OPENALEX, citation_count=10, year=2023),
+            _make_candidate("RLHF Paper", doi="10.1/a", openalex_id="W1",
+                            source=SourceName.OPENALEX, citation_count=50, year=2024),
+            _make_candidate("Reward Modeling", doi="10.1/b", openalex_id="W2",
+                            source=SourceName.OPENALEX, citation_count=10, year=2023),
         ]
         arxiv_cands = [
-            _make_candidate("PPO for RLHF", arxiv_id="2301.001", source=SourceName.ARXIV, year=2023),
+            _make_candidate("PPO for RLHF", arxiv_id="2301.001",
+                            source=SourceName.ARXIV, year=2023),
         ]
         s2_cands = [
-            _make_candidate("Alignment Survey", s2_id="s2-1", source=SourceName.SEMANTIC_SCHOLAR, citation_count=100, year=2024),
+            _make_candidate("Alignment Survey", s2_id="s2-1",
+                            source=SourceName.SEMANTIC_SCHOLAR, citation_count=100, year=2024),
         ]
         dblp_cands: list[RawCandidate] = []
         or_cands: list[RawCandidate] = []
@@ -183,7 +184,8 @@ class TestRetrievalPipeline:
 
         import scholartrace.services.retrieval as retrieval_mod
 
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         works = asyncio.get_event_loop().run_until_complete(
             run_retrieval(theme, storage)
@@ -211,7 +213,8 @@ class TestRetrievalPipeline:
         # The job was created inside run_retrieval; find it
         import sqlite3
         conn = storage._get_conn()
-        row = conn.execute("SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
         assert row is not None
         job = mgr.get_job(row["id"])
         assert job is not None
@@ -223,7 +226,8 @@ class TestRetrievalPipeline:
         storage = _tmp_storage(tmp_path)
         theme = _sample_theme()
 
-        good_cands = [_make_candidate("Good Paper", doi="10.1/g", openalex_id="W10", citation_count=5)]
+        good_cands = [_make_candidate(
+            "Good Paper", doi="10.1/g", openalex_id="W10", citation_count=5)]
         mock_connectors = [
             _make_mock_connector("openalex", good_cands),
             _make_failing_connector("arxiv", RuntimeError("arXiv is down")),
@@ -234,7 +238,8 @@ class TestRetrievalPipeline:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         works = asyncio.get_event_loop().run_until_complete(
             run_retrieval(theme, storage)
@@ -249,10 +254,12 @@ class TestRetrievalPipeline:
 
         # Same paper via DOI overlap
         oa_cands = [
-            _make_candidate("Unified RLHF Method", doi="10.1/rlhf", openalex_id="W20", source=SourceName.OPENALEX, citation_count=30, year=2024),
+            _make_candidate("Unified RLHF Method", doi="10.1/rlhf", openalex_id="W20",
+                            source=SourceName.OPENALEX, citation_count=30, year=2024),
         ]
         s2_cands = [
-            _make_candidate("Unified RLHF Method", doi="10.1/rlhf", s2_id="s2-20", source=SourceName.SEMANTIC_SCHOLAR, citation_count=30, year=2024),
+            _make_candidate("Unified RLHF Method", doi="10.1/rlhf", s2_id="s2-20",
+                            source=SourceName.SEMANTIC_SCHOLAR, citation_count=30, year=2024),
         ]
 
         mock_connectors = [
@@ -265,7 +272,8 @@ class TestRetrievalPipeline:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         works = asyncio.get_event_loop().run_until_complete(
             run_retrieval(theme, storage)
@@ -279,9 +287,12 @@ class TestRetrievalPipeline:
         theme = _sample_theme()
 
         oa_cands = [
-            _make_candidate("Highly Cited RLHF", doi="10.1/h", openalex_id="W30", citation_count=500, year=2024),
-            _make_candidate("Medium Cited RLHF", doi="10.1/m", openalex_id="W31", citation_count=50, year=2024),
-            _make_candidate("Low Cited RLHF", doi="10.1/l", openalex_id="W32", citation_count=1, year=2020),
+            _make_candidate("Highly Cited RLHF", doi="10.1/h",
+                            openalex_id="W30", citation_count=500, year=2024),
+            _make_candidate("Medium Cited RLHF", doi="10.1/m",
+                            openalex_id="W31", citation_count=50, year=2024),
+            _make_candidate("Low Cited RLHF", doi="10.1/l",
+                            openalex_id="W32", citation_count=1, year=2020),
         ]
 
         mock_connectors = [
@@ -294,7 +305,8 @@ class TestRetrievalPipeline:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         works = asyncio.get_event_loop().run_until_complete(
             run_retrieval(theme, storage)
@@ -322,7 +334,8 @@ class TestRetrievalPipeline:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         works = asyncio.get_event_loop().run_until_complete(
             run_retrieval(theme, storage)
@@ -350,7 +363,8 @@ class TestRetrievalPipeline:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         # Make ranking blow up
         def _boom(*args, **kwargs):
@@ -366,7 +380,8 @@ class TestRetrievalPipeline:
         # Job should be FAILED
         import sqlite3
         conn = storage._get_conn()
-        row = conn.execute("SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
         assert row is not None
         assert row["status"] == "failed"
         assert "ranking exploded" in row["error_message"]
@@ -391,7 +406,8 @@ class TestRetrievalForDocument:
         ]
 
         import scholartrace.services.retrieval as retrieval_mod
-        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "_build_connectors",
+                            lambda _s: mock_connectors)
 
         doc = "This paper discusses reinforcement learning from human feedback and reward modeling."
         theme, works = asyncio.get_event_loop().run_until_complete(

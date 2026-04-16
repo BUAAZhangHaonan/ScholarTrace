@@ -18,7 +18,6 @@ from scholartrace.config import get_settings
 from scholartrace.models.schemas import Theme, Work
 
 # ── Venue tiers ──────────────────────────────────────────────────────
-
 TOP_TIER_VENUES: set[str] = {
     v.lower()
     for v in (
@@ -112,7 +111,7 @@ def _relevance_scores(works: Sequence[Work], theme: Theme) -> list[float]:
     theme_vec = tfidf_matrix[0:1]
     scores: list[float] = []
     for i in range(len(works)):
-        paper_vec = tfidf_matrix[i + 1 : i + 2]
+        paper_vec = tfidf_matrix[i + 1: i + 2]
         sim = cosine_similarity(theme_vec, paper_vec)[0][0]
         # Clip to [0, 1]
         scores.append(float(np.clip(sim, 0.0, 1.0)))
@@ -147,7 +146,6 @@ def _source_agreement_score(source_provenance: list[str]) -> float:
 
 
 # ── Main entry point ─────────────────────────────────────────────────
-
 def rank_papers(
     works: list[Work],
     theme: Theme,

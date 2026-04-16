@@ -29,7 +29,8 @@ from pathlib import Path
 import httpx
 
 
-SCHOLARTRACE_URL = os.environ.get("SCHOLARTRACE_API_URL", "http://localhost:8000")
+SCHOLARTRACE_URL = os.environ.get(
+    "SCHOLARTRACE_API_URL", "http://localhost:8000")
 BIGMODEL_API_KEY = os.environ.get(
     "BIGMODEL_API_KEY",
     "d177a2b9dd11494089bfaaae1d313c86.nen8jEX2bgDa6ViW",
@@ -228,7 +229,8 @@ def main():
     parser.add_argument(
         "--query", "-q", help="Custom research query (default: sycophancy brief)"
     )
-    parser.add_argument("--theme-file", "-t", help="Path to theme document file")
+    parser.add_argument("--theme-file", "-t",
+                        help="Path to theme document file")
     parser.add_argument(
         "--limit", "-n", type=int, default=50, help="Number of papers (default: 50)"
     )

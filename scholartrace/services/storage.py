@@ -27,7 +27,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Connection helpers
     # ------------------------------------------------------------------
-
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -44,7 +43,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
-
     def init_db(self) -> None:
         conn = self._get_conn()
         conn.executescript(
@@ -148,7 +146,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Serialization helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _dt_to_str(dt: datetime | None) -> str | None:
         if dt is None:
@@ -176,7 +173,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Work CRUD
     # ------------------------------------------------------------------
-
     def _row_to_work(self, row: sqlite3.Row) -> Work:
         return Work(
             id=row["id"],
@@ -256,14 +252,16 @@ class StorageService:
 
     def get_work(self, work_id: str) -> Work | None:
         conn = self._get_conn()
-        row = conn.execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+        row = conn.execute("SELECT * FROM works WHERE id = ?",
+                           (work_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_work(row)
 
     def get_work_by_doi(self, doi: str) -> Work | None:
         conn = self._get_conn()
-        row = conn.execute("SELECT * FROM works WHERE doi = ?", (doi,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM works WHERE doi = ?", (doi,)).fetchone()
         if row is None:
             return None
         return self._row_to_work(row)
@@ -321,7 +319,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Artifact CRUD
     # ------------------------------------------------------------------
-
     def _row_to_artifact(self, row: sqlite3.Row) -> Artifact:
         return Artifact(
             id=row["id"],
@@ -369,7 +366,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Section CRUD
     # ------------------------------------------------------------------
-
     def _row_to_section(self, row: sqlite3.Row) -> Section:
         return Section(
             id=row["id"],
@@ -414,7 +410,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Theme CRUD
     # ------------------------------------------------------------------
-
     def _row_to_theme(self, row: sqlite3.Row) -> Theme:
         return Theme(
             id=row["id"],
@@ -460,7 +455,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Job CRUD
     # ------------------------------------------------------------------
-
     def _row_to_job(self, row: sqlite3.Row) -> RetrievalJob:
         return RetrievalJob(
             id=row["id"],
@@ -531,7 +525,6 @@ class StorageService:
     # ------------------------------------------------------------------
     # Theme-Work link
     # ------------------------------------------------------------------
-
     def link_theme_work(
         self, theme_id: str, work_id: str, rank_order: int
     ) -> None:

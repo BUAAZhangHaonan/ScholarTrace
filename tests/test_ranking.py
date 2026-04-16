@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import math
-
-import pytest
-
 from scholartrace.models.schemas import Theme, Work
 from scholartrace.services.ranking import rank_papers
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
 def _work(
     *,
     title: str = "Test Paper",
@@ -38,8 +33,6 @@ def _theme(queries: list[str] | None = None) -> Theme:
 
 
 # ── Tests ────────────────────────────────────────────────────────────
-
-
 class TestScoreRanges:
     """All individual scores and composite must be in [0, 1]."""
 

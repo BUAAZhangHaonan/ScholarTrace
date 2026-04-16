@@ -32,7 +32,6 @@ class CrossrefConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         cursor = "*"
@@ -70,7 +69,6 @@ class CrossrefConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_item(item: dict[str, Any]) -> RawCandidate | None:
         # Title is an array — take the first element

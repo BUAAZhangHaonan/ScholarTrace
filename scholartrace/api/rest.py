@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -20,7 +19,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Application instance
 # ---------------------------------------------------------------------------
-
 app = FastAPI(title="ScholarTrace", version="0.1.0")
 
 # Module-level singletons – initialised lazily on first request.
@@ -46,8 +44,6 @@ def _get_settings() -> Settings:
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
-
-
 @app.get("/health")
 def health_check() -> dict:
     return {"status": "ok", "version": "0.1.0"}
@@ -56,8 +52,6 @@ def health_check() -> dict:
 # ---------------------------------------------------------------------------
 # Themes
 # ---------------------------------------------------------------------------
-
-
 @app.post("/themes", response_model=Theme)
 def create_theme(text: str = Form(...)) -> Theme:
     storage = _get_storage()
@@ -69,8 +63,6 @@ def create_theme(text: str = Form(...)) -> Theme:
 # ---------------------------------------------------------------------------
 # Retrieval jobs
 # ---------------------------------------------------------------------------
-
-
 @app.post("/retrieval/jobs", response_model=RetrievalJob)
 def create_retrieval_job(
     background_tasks: BackgroundTasks,
@@ -126,8 +118,6 @@ def get_job_status(job_id: str) -> RetrievalJob:
 # ---------------------------------------------------------------------------
 # Papers
 # ---------------------------------------------------------------------------
-
-
 @app.get("/themes/{theme_id}/papers", response_model=list[Work])
 def list_papers(
     theme_id: str,
@@ -205,8 +195,6 @@ def get_fulltext(paper_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
-
-
 @app.get("/themes/{theme_id}/export", response_model=None)
 def export_theme(
     theme_id: str,
@@ -226,7 +214,8 @@ def export_theme(
         }
 
     if format == "markdown":
-        theme_excerpt = theme.document_text[:80] if theme.document_text else theme.id
+        theme_excerpt = theme.document_text[:
+                                            80] if theme.document_text else theme.id
         lines: list[str] = []
         lines.append(f"# ScholarTrace Report: {theme_excerpt}")
         lines.append("")
@@ -234,7 +223,8 @@ def export_theme(
         lines.append("")
         for idx, w in enumerate(works, start=1):
             lines.append(f"### {idx}. {w.title or 'Untitled'}")
-            lines.append(f"- Authors: {', '.join(w.authors) if w.authors else 'N/A'}")
+            lines.append(
+                f"- Authors: {', '.join(w.authors) if w.authors else 'N/A'}")
             lines.append(f"- Year: {w.year or 'N/A'}")
             lines.append(f"- Venue: {w.venue or 'N/A'}")
             lines.append(f"- Score: {w.composite_score:.4f}")

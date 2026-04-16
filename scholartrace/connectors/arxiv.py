@@ -34,7 +34,6 @@ class ArxivConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         start = 0
@@ -76,8 +75,6 @@ class ArxivConnector(BaseConnector):
 # ------------------------------------------------------------------
 # XML parsing helpers
 # ------------------------------------------------------------------
-
-
 def _parse_atom_entries(xml_text: str) -> list[dict[str, Any]]:
     """Parse the Atom feed and return a list of entry element trees."""
     root = ET.fromstring(xml_text)

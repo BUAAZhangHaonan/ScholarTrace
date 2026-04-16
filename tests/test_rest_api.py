@@ -8,8 +8,8 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
-from scholartrace.api.rest import app, _storage, _settings
-from scholartrace.models.schemas import Work, Theme, Section, Artifact, ArtifactKind, AccessStatus
+from scholartrace.api.rest import app
+from scholartrace.models.schemas import Work, Theme
 from scholartrace.services.storage import StorageService
 
 
@@ -52,7 +52,6 @@ def client():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _make_theme(storage: StorageService, text: str = "RLHF and reward hacking") -> Theme:
     from scholartrace.services.theme_parser import parse_theme
     theme = parse_theme(text)
@@ -72,8 +71,6 @@ def _make_work(storage: StorageService, title: str = "Test Paper", theme_id: str
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
 def test_health_check(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -83,7 +80,8 @@ def test_health_check(client: TestClient):
 
 
 def test_create_theme(client: TestClient):
-    resp = client.post("/themes", data={"text": "Reinforcement learning from human feedback and reward hacking in large language models"})
+    resp = client.post(
+        "/themes", data={"text": "Reinforcement learning from human feedback and reward hacking in large language models"})
     assert resp.status_code == 200
     data = resp.json()
     assert "id" in data

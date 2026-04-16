@@ -37,7 +37,6 @@ class SemanticScholarConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         offset = 0
@@ -79,7 +78,6 @@ class SemanticScholarConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_paper(paper: dict[str, Any]) -> RawCandidate | None:
         title = paper.get("title")

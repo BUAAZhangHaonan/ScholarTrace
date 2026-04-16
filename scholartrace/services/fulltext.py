@@ -14,7 +14,6 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
@@ -39,8 +38,6 @@ _HTTP_TIMEOUT = 30.0
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
-
-
 async def _fetch_html(url: str, client: httpx.AsyncClient) -> str | None:
     """Fetch HTML content from *url*. Returns ``None`` on any error."""
     try:
@@ -116,7 +113,8 @@ def _parse_html_sections(html: str) -> list[tuple[str, str]]:
             if sibling in headings:
                 break
             if hasattr(sibling, "get_text"):
-                content_parts.append(sibling.get_text(separator="\n", strip=True))
+                content_parts.append(sibling.get_text(
+                    separator="\n", strip=True))
             elif isinstance(sibling, str) and sibling.strip():
                 content_parts.append(sibling.strip())
         content = "\n".join(content_parts).strip()
@@ -185,7 +183,8 @@ def _save_sections(
     for i, (title, text) in enumerate(sections):
         section_path = sections_dir / f"{work_id}_section_{i}.json"
         section_path.write_text(
-            json.dumps({"title": title, "text": text}, ensure_ascii=False, indent=2)
+            json.dumps({"title": title, "text": text},
+                       ensure_ascii=False, indent=2)
         )
 
         sec = Section(
@@ -232,8 +231,6 @@ def _save_parsed_text(
 # ------------------------------------------------------------------
 # Main cascade
 # ------------------------------------------------------------------
-
-
 async def acquire_fulltext(
     work: Work,
     storage: StorageService,
@@ -264,7 +261,8 @@ async def acquire_fulltext(
                     full_text = "\n\n".join(content for _, content in sections)
                     _save_parsed_text(work.id, full_text, storage, settings)
                     # Save individual sections.
-                    _save_sections(work.id, html_artifact.id, sections, storage, settings)
+                    _save_sections(work.id, html_artifact.id,
+                                   sections, storage, settings)
 
                     work.fulltext_available = True
                     work.access_status = AccessStatus.AVAILABLE

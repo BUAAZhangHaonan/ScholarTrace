@@ -35,7 +35,6 @@ class OpenAlexConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         cursor = "*"
@@ -71,7 +70,6 @@ class OpenAlexConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_work(work: dict[str, Any]) -> RawCandidate | None:
         title = work.get("title")

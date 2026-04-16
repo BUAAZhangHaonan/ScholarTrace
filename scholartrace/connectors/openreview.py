@@ -29,7 +29,6 @@ class OpenReviewConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     async def search(self, query: str, max_results: int = 200) -> list[RawCandidate]:
         results: list[RawCandidate] = []
         offset = 0
@@ -69,7 +68,6 @@ class OpenReviewConnector(BaseConnector):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_note(note: dict[str, Any]) -> RawCandidate | None:
         content = note.get("content", {})

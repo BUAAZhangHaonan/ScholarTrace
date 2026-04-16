@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from scholartrace.config import Settings, get_settings
+from scholartrace.config import get_settings
 from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,6 @@ mcp = FastMCP("ScholarTrace")
 # ---------------------------------------------------------------------------
 # Lazy-initialised storage singleton (overridable in tests)
 # ---------------------------------------------------------------------------
-
 _storage: StorageService | None = None
 
 
@@ -45,8 +44,6 @@ def set_storage(storage: StorageService) -> None:
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
-
-
 def _work_to_dict(work: Any) -> dict[str, Any]:
     """Serialise a Work model to a plain dict suitable for JSON."""
     return {
@@ -98,8 +95,6 @@ def _work_summary(work: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
-
-
 @mcp.tool()
 async def search_papers_by_theme(theme_document: str) -> str:
     """Parse a theme document and run the full retrieval pipeline.
@@ -318,7 +313,8 @@ async def export_theme_report(theme_id: str, format: str = "json") -> str:
                 lines.append(f"**arXiv**: {w.arxiv_id}")
             if w.abstract:
                 lines.append("")
-                lines.append(f"> {w.abstract[:500]}{'...' if len(w.abstract) > 500 else ''}")
+                lines.append(
+                    f"> {w.abstract[:500]}{'...' if len(w.abstract) > 500 else ''}")
             lines.append("")
             lines.append("---")
             lines.append("")
