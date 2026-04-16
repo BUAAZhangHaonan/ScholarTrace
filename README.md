@@ -136,7 +136,7 @@ The MCP server provides 12 tools for LLM agent integration. The default transpor
 | 2 | `get_ranked_papers` | Get ranked papers for a stored theme |
 | 3 | `get_paper_metadata` | Full paper metadata by ID |
 | 4 | `get_paper_sections` | Section-level content extraction |
-| 5 | `get_paper_fulltext` | Full text (triggers download cascade) |
+| 5 | `get_paper_fulltext` | Cached full text only; use the explicit acquire tool for network fetches |
 | 6 | `get_related_papers` | Related papers by shared venue and year |
 | 7 | `export_theme_report` | Export full report as JSON or Markdown |
 | 8 | `deepxiv_search` | Search arXiv via DeepXiv (hybrid BM25 + vector) |

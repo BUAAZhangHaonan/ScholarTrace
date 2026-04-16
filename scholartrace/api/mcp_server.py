@@ -20,6 +20,12 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from scholartrace.api.contracts import tool_error_json
+from scholartrace.api.payloads import (
+    deepxiv_search_payload,
+    deepxiv_summary_payload,
+    public_work_payload,
+    theme_report_json_payload,
+)
 from scholartrace.api.security import AccessTokenMiddleware
 from scholartrace.config import Settings, get_settings
 from scholartrace.services import runtime_limits
@@ -72,44 +78,6 @@ def set_storage(storage: StorageService) -> None:
     """Replace the module-level storage instance (useful for testing)."""
     global _storage
     _storage = storage
-
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-def _work_to_dict(work: Any) -> dict[str, Any]:
-    """Serialise a Work model to a plain dict suitable for JSON."""
-    return {
-        "id": work.id,
-        "doi": work.doi,
-        "arxiv_id": work.arxiv_id,
-        "openalex_id": work.openalex_id,
-        "s2_id": work.s2_id,
-        "dblp_key": work.dblp_key,
-        "openreview_id": work.openreview_id,
-        "title": work.title,
-        "authors": work.authors,
-        "year": work.year,
-        "venue": work.venue,
-        "abstract": work.abstract,
-        "relevance_score": work.relevance_score,
-        "recency_score": work.recency_score,
-        "influence_score": work.influence_score,
-        "venue_score": work.venue_score,
-        "composite_score": work.composite_score,
-        "fulltext_available": work.fulltext_available,
-        "access_status": work.access_status.value
-        if hasattr(work.access_status, "value")
-        else str(work.access_status),
-        "source_provenance": work.source_provenance,
-        "citation_count": work.citation_count,
-        "reference_count": work.reference_count,
-        "pdf_url": work.pdf_url,
-        "html_url": work.html_url,
-        "oa_url": work.oa_url,
-        "created_at": work.created_at.isoformat() if work.created_at else None,
-        "updated_at": work.updated_at.isoformat() if work.updated_at else None,
-    }
 
 
 def _work_summary(work: Any) -> dict[str, Any]:
@@ -203,7 +171,7 @@ async def get_paper_metadata(paper_id: str) -> str:
     work = storage.get_work(paper_id)
     if work is None:
         return tool_error_json("not_found", f"Paper {paper_id} not found")
-    return json.dumps(_work_to_dict(work), ensure_ascii=False)
+    return json.dumps(public_work_payload(work), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -376,16 +344,7 @@ async def export_theme_report(theme_id: str, format: str = "json") -> str:
         return "\n".join(lines)
 
     # Default: JSON
-    papers = [_work_to_dict(w) for w in works]
-    report = {
-        "theme_id": theme_id,
-        "parsed_topics": theme.parsed_topics,
-        "parsed_methods": theme.parsed_methods,
-        "parsed_datasets": theme.parsed_datasets,
-        "parsed_queries": theme.parsed_queries,
-        "total_papers": len(papers),
-        "papers": papers,
-    }
+    report = theme_report_json_payload(theme_id, theme, works)
     return json.dumps(report, ensure_ascii=False)
 
 
@@ -457,19 +416,7 @@ async def deepxiv_search(
             authors=auth_list,
         )
 
-    papers = []
-    for c in candidates:
-        papers.append({
-            "title": c.title,
-            "authors": c.authors,
-            "year": c.year,
-            "abstract": (c.abstract or "")[:500],
-            "arxiv_id": c.arxiv_id,
-            "doi": c.doi,
-            "citation_count": c.citation_count,
-        })
-
-    return json.dumps({"total": len(papers), "papers": papers}, ensure_ascii=False)
+    return json.dumps(deepxiv_search_payload(candidates), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -490,13 +437,10 @@ async def deepxiv_paper_summary(arxiv_id: str) -> str:
     if head is None and brief is None:
         return tool_error_json("not_found", f"Paper {arxiv_id} not found on DeepXiv")
 
-    result = {}
-    if head:
-        result["head"] = head
-    if brief:
-        result["brief"] = brief
-
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(
+        deepxiv_summary_payload(arxiv_id, head, brief),
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()

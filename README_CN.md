@@ -12,7 +12,7 @@
 - **多目标排序**：相关性（TF-IDF）、时效性（指数衰减）、影响力（对数归一化引用）、期刊质量、开放获取加分、来源一致性
 - **全文获取级联**：arXiv HTML → arXiv PDF（PyMuPDF）→ OA URL → 仅摘要回退
 - **DeepXiv 集成**：混合 BM25 + 向量搜索、论文元数据与 TLDR、全文提取、基于 Agent 的智能筛选
-- **双接口**：REST API（FastAPI，端口 9000）和 MCP 服务器（SSE 传输，端口 8001）
+- **双接口**：REST API（FastAPI，端口 9000）和 MCP 服务器（默认 stdio，SSE 可选，端口 8001）
 - **BigModel GLM 集成**：使用 `glm-5-turbo` 进行智能文献分析
 
 ## 快速开始
@@ -112,7 +112,7 @@ MCP 服务器提供 12 个工具用于 LLM 代理集成：
 | 2 | `get_ranked_papers` | 获取已存储主题的排序论文 |
 | 3 | `get_paper_metadata` | 按 ID 获取完整论文元数据 |
 | 4 | `get_paper_sections` | 章节级内容提取 |
-| 5 | `get_paper_fulltext` | 全文（触发下载级联） |
+| 5 | `get_paper_fulltext` | 仅返回已缓存全文；需要网络获取时请使用显式 acquire 工具 |
 | 6 | `get_related_papers` | 按共享期刊和年份查找相关论文 |
 | 7 | `export_theme_report` | 导出完整报告（JSON 或 Markdown） |
 

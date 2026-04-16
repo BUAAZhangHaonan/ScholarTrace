@@ -157,6 +157,10 @@ async def test_get_paper_metadata(test_storage):
     assert data["arxiv_id"] == "2401.00001"
     assert "composite_score" in data
     assert "citation_count" in data
+    assert "source_provenance" not in data
+    assert "pdf_url" not in data
+    assert "html_url" not in data
+    assert "oa_url" not in data
 
 
 @pytest.mark.asyncio
@@ -322,6 +326,10 @@ async def test_export_theme_report_json(test_storage):
     assert data["total_papers"] == 3
     assert len(data["papers"]) == 3
     assert data["parsed_topics"] == ["topic-a"]
+    assert "source_provenance" not in data["papers"][0]
+    assert "pdf_url" not in data["papers"][0]
+    assert "html_url" not in data["papers"][0]
+    assert "oa_url" not in data["papers"][0]
 
 
 @pytest.mark.asyncio
@@ -361,3 +369,56 @@ async def test_export_theme_report_not_found(test_storage):
             "retryable": False,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_deepxiv_mcp_summary_and_search_contract_are_public_and_thin(monkeypatch):
+    from scholartrace.api import mcp_server
+
+    class _FakeConnector:
+        async def search(self, *args, **kwargs):
+            from types import SimpleNamespace
+
+            return [
+                SimpleNamespace(
+                    title="DeepXiv Search Paper",
+                    authors=["Alice", "Bob"],
+                    year=2024,
+                    abstract="A long abstract for DeepXiv search payload parity.",
+                    arxiv_id="2401.00001",
+                    doi="10.1234/deepxiv",
+                    citation_count=7,
+                )
+            ]
+
+        async def get_paper_metadata(self, arxiv_id):
+            return {"title": "DeepXiv Head", "arxiv_id": arxiv_id, "pdf_url": "https://leak.example/paper.pdf"}
+
+        async def get_paper_brief(self, arxiv_id):
+            return {"tldr": "Brief summary"}
+
+    mcp_server._deepxiv_connector = None
+    monkeypatch.setattr("scholartrace.connectors.deepxiv_connector.DeepXivConnector", lambda settings=None: _FakeConnector())
+
+    search_payload = json.loads(await mcp_server.deepxiv_search("parity", max_results=5))
+    assert search_payload == {
+        "total": 1,
+        "papers": [
+            {
+                "title": "DeepXiv Search Paper",
+                "authors": ["Alice", "Bob"],
+                "year": 2024,
+                "abstract": "A long abstract for DeepXiv search payload parity.",
+                "arxiv_id": "2401.00001",
+                "doi": "10.1234/deepxiv",
+                "citation_count": 7,
+            }
+        ],
+    }
+
+    summary_payload = json.loads(await mcp_server.deepxiv_paper_summary("2401.00001"))
+    assert summary_payload["arxiv_id"] == "2401.00001"
+    assert "metadata" in summary_payload
+    assert "brief" in summary_payload
+    assert "head" not in summary_payload
+    assert "pdf_url" not in summary_payload["metadata"]

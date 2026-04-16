@@ -17,6 +17,13 @@ from typing import Any
 from fastapi.responses import PlainTextResponse
 
 from scholartrace.api.contracts import error_response, safe_http_exception_response
+from scholartrace.api.payloads import (
+    deepxiv_search_payload,
+    deepxiv_summary_payload,
+    public_work_list_payload,
+    public_work_payload,
+    theme_export_json_payload,
+)
 from scholartrace.api.security import (
     extract_access_token,
     is_valid_access_token,
@@ -24,7 +31,7 @@ from scholartrace.api.security import (
 )
 from scholartrace.config import Settings, get_settings
 from scholartrace.jobs.manager import JobManager
-from scholartrace.models.schemas import RetrievalJob, Theme, Work
+from scholartrace.models.schemas import RetrievalJob, Theme
 from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
@@ -192,7 +199,7 @@ def get_job_status(job_id: str) -> RetrievalJob:
 # ---------------------------------------------------------------------------
 # Papers
 # ---------------------------------------------------------------------------
-@app.get("/themes/{theme_id}/papers", response_model=list[Work])
+@app.get("/themes/{theme_id}/papers", response_model=list[dict[str, Any]])
 def list_papers(
     theme_id: str,
     limit: int = Query(default=50, ge=1),
@@ -202,16 +209,16 @@ def list_papers(
     theme = storage.get_theme(theme_id)
     if theme is None:
         raise HTTPException(status_code=404, detail="Theme not found")
-    return storage.list_works_by_theme(theme_id, limit, offset)
+    return public_work_list_payload(storage.list_works_by_theme(theme_id, limit, offset))
 
 
-@app.get("/papers/{paper_id}", response_model=Work)
-def get_paper(paper_id: str) -> Work:
+@app.get("/papers/{paper_id}", response_model=dict[str, Any])
+def get_paper(paper_id: str) -> dict[str, Any]:
     storage = _get_storage()
     work = storage.get_work(paper_id)
     if work is None:
         raise HTTPException(status_code=404, detail="Paper not found")
-    return work
+    return public_work_payload(work)
 
 
 @app.get("/papers/{paper_id}/sections")
@@ -272,10 +279,7 @@ def export_theme(
     works = storage.list_works_by_theme(theme_id, limit=10000, offset=0)
 
     if format == "json":
-        return {
-            "theme": theme.model_dump(),
-            "papers": [w.model_dump() for w in works],
-        }
+        return theme_export_json_payload(theme, works)
 
     if format == "markdown":
         theme_excerpt = theme.document_text[:
@@ -341,6 +345,7 @@ async def deepxiv_search(
     max_results: int = Form(default=20),
     search_mode: str = Form(default="hybrid"),
     categories: str = Form(default=""),
+    authors: str = Form(default=""),
 ) -> dict:
     """Search arXiv papers via DeepXiv."""
     try:
@@ -350,29 +355,19 @@ async def deepxiv_search(
         ):
             connector = _get_deepxiv_rest()
             cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+            auth_list = [a.strip() for a in authors.split(",") if a.strip()] or None
 
             candidates = await connector.search(
                 query,
                 max_results=min(max_results, 200),
                 search_mode=search_mode,
                 categories=cat_list,
+                authors=auth_list,
             )
     except runtime_limits.RateLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-    papers = []
-    for c in candidates:
-        papers.append({
-            "title": c.title,
-            "authors": c.authors,
-            "year": c.year,
-            "abstract": c.abstract,
-            "arxiv_id": c.arxiv_id,
-            "doi": c.doi,
-            "citation_count": c.citation_count,
-        })
-
-    return {"total": len(papers), "papers": papers}
+    return deepxiv_search_payload(candidates)
 
 
 @app.get("/deepxiv/papers/{arxiv_id}/summary")
@@ -385,12 +380,7 @@ async def deepxiv_paper_summary(arxiv_id: str) -> dict:
     if head is None and brief is None:
         raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on DeepXiv")
 
-    result: dict = {"arxiv_id": arxiv_id}
-    if head:
-        result["metadata"] = head
-    if brief:
-        result["brief"] = brief
-    return result
+    return deepxiv_summary_payload(arxiv_id, head, brief)
 
 
 @app.get("/deepxiv/papers/{arxiv_id}/fulltext")

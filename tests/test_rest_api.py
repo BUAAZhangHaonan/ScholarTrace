@@ -112,6 +112,53 @@ def test_get_paper_not_found(client: TestClient):
     assert resp.status_code == 404
 
 
+def test_paper_surfaces_redact_internal_metadata(client: TestClient):
+    import scholartrace.api.rest as rest_module
+
+    theme = _make_theme(rest_module._storage, text="redaction theme")
+    work = Work(
+        title="Redacted Paper",
+        authors=["Alice", "Bob"],
+        year=2024,
+        venue="ICLR",
+        abstract="A test abstract.",
+        source_provenance=["openalex", "arxiv"],
+        pdf_url="https://example.com/paper.pdf",
+        html_url="https://example.com/paper.html",
+        oa_url="https://example.com/oa.pdf",
+        citation_count=11,
+    )
+    rest_module._storage.save_work(work)
+    rest_module._storage.link_theme_work(theme.id, work.id, 1)
+
+    paper_resp = client.get(f"/papers/{work.id}")
+    assert paper_resp.status_code == 200
+    paper = paper_resp.json()
+    assert paper["title"] == "Redacted Paper"
+    assert "source_provenance" not in paper
+    assert "pdf_url" not in paper
+    assert "html_url" not in paper
+    assert "oa_url" not in paper
+
+    themed_resp = client.get(f"/themes/{theme.id}/papers")
+    assert themed_resp.status_code == 200
+    themed = themed_resp.json()[0]
+    assert themed["title"] == "Redacted Paper"
+    assert "source_provenance" not in themed
+    assert "pdf_url" not in themed
+    assert "html_url" not in themed
+    assert "oa_url" not in themed
+
+    export_resp = client.get(f"/themes/{theme.id}/export?format=json")
+    assert export_resp.status_code == 200
+    exported = export_resp.json()["papers"][0]
+    assert exported["title"] == "Redacted Paper"
+    assert "source_provenance" not in exported
+    assert "pdf_url" not in exported
+    assert "html_url" not in exported
+    assert "oa_url" not in exported
+
+
 def test_create_retrieval_job(client: TestClient):
     import scholartrace.api.rest as rest_module
     theme = _make_theme(rest_module._storage)
@@ -228,6 +275,69 @@ def test_fulltext_response_redacts_local_path(client: TestClient):
     data = resp.json()
     assert data["artifacts"][0]["source_url"] == "https://example.com/paper.pdf"
     assert "local_path" not in data["artifacts"][0]
+
+
+def test_deepxiv_rest_summary_and_search_contract_are_public_and_thin(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    import scholartrace.api.rest as rest_module
+
+    search_calls: list[dict[str, object]] = []
+
+    class _FakeConnector:
+        async def search(self, *args, **kwargs):
+            search_calls.append(dict(kwargs))
+            from types import SimpleNamespace
+
+            return [
+                SimpleNamespace(
+                    title="DeepXiv Search Paper",
+                    authors=["Alice", "Bob"],
+                    year=2024,
+                    abstract="A long abstract for DeepXiv search payload parity.",
+                    arxiv_id="2401.00001",
+                    doi="10.1234/deepxiv",
+                    citation_count=7,
+                )
+            ]
+
+        async def get_paper_metadata(self, arxiv_id):
+            return {"title": "DeepXiv Head", "arxiv_id": arxiv_id, "pdf_url": "https://leak.example/paper.pdf"}
+
+        async def get_paper_brief(self, arxiv_id):
+            return {"tldr": "Brief summary"}
+
+    rest_module._deepxiv_connector_rest = None
+    monkeypatch.setattr("scholartrace.connectors.deepxiv_connector.DeepXivConnector", lambda settings=None: _FakeConnector())
+
+    search_resp = client.post(
+        "/deepxiv/search",
+        data={"query": "parity", "max_results": 5, "authors": "Alice Smith"},
+    )
+    assert search_resp.status_code == 200
+    search_payload = search_resp.json()
+    assert search_payload == {
+        "total": 1,
+        "papers": [
+            {
+                "title": "DeepXiv Search Paper",
+                "authors": ["Alice", "Bob"],
+                "year": 2024,
+                "abstract": "A long abstract for DeepXiv search payload parity.",
+                "arxiv_id": "2401.00001",
+                "doi": "10.1234/deepxiv",
+                "citation_count": 7,
+            }
+        ],
+    }
+    assert search_calls[0]["authors"] == ["Alice Smith"]
+
+    summary_resp = client.get("/deepxiv/papers/2401.00001/summary")
+    assert summary_resp.status_code == 200
+    summary_payload = summary_resp.json()
+    assert summary_payload["arxiv_id"] == "2401.00001"
+    assert "metadata" in summary_payload
+    assert "brief" in summary_payload
+    assert "head" not in summary_payload
+    assert "pdf_url" not in summary_payload["metadata"]
 
 
 def test_fulltext_get_is_cache_only_and_reports_missing_state(client: TestClient):

@@ -7,6 +7,7 @@ import tempfile
 import httpx
 import pytest
 
+from scholartrace.api.payloads import deepxiv_summary_payload
 from scholartrace.config import Settings
 from scholartrace.deepxiv.agent import DeepXivAgent
 from scholartrace.deepxiv.token_pool import TokenPool
@@ -149,3 +150,25 @@ def test_rest_and_mcp_wrappers_share_configured_deepxiv_settings(monkeypatch: py
         asyncio.run(mcp_module._get_deepxiv())
 
         assert captured == [settings, settings]
+
+
+def test_deepxiv_summary_payload_redacts_internal_fields():
+    payload = deepxiv_summary_payload(
+        "2401.00001",
+        {
+            "title": "DeepXiv Head",
+            "pdf_url": "https://example.com/paper.pdf",
+            "html_url": "https://example.com/paper.html",
+            "source_provenance": ["deepxiv"],
+        },
+        {
+            "tldr": "Brief summary",
+            "oa_url": "https://example.com/oa.pdf",
+        },
+    )
+
+    assert payload == {
+        "arxiv_id": "2401.00001",
+        "metadata": {"title": "DeepXiv Head"},
+        "brief": {"tldr": "Brief summary"},
+    }

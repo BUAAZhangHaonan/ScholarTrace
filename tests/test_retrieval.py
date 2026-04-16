@@ -97,6 +97,10 @@ def _sample_theme() -> Theme:
     )
 
 
+def _run(coro):
+    return asyncio.run(coro)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -202,9 +206,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "_build_connectors",
                             lambda _s: mock_connectors)
 
-        works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval(theme, storage)
-        )
+        works = _run(run_retrieval(theme, storage))
 
         # 4 distinct papers
         assert len(works) == 4
@@ -249,9 +251,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "_build_connectors",
                             lambda _s: mock_connectors)
 
-        works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval(theme, storage)
-        )
+        works = _run(run_retrieval(theme, storage))
         assert len(works) == 1
         assert works[0].title == "Good Paper"
 
@@ -283,9 +283,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "_build_connectors",
                             lambda _s: mock_connectors)
 
-        works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval(theme, storage)
-        )
+        works = _run(run_retrieval(theme, storage))
         assert len(works) == 1
         assert works[0].source_provenance == ["openalex", "semantic_scholar"]
 
@@ -316,9 +314,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "_build_connectors",
                             lambda _s: mock_connectors)
 
-        works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval(theme, storage)
-        )
+        works = _run(run_retrieval(theme, storage))
         assert len(works) == 3
         for i in range(len(works) - 1):
             assert works[i].composite_score >= works[i + 1].composite_score
@@ -345,9 +341,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "_build_connectors",
                             lambda _s: mock_connectors)
 
-        works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval(theme, storage)
-        )
+        works = _run(run_retrieval(theme, storage))
 
         for w in works:
             fetched = storage.get_work(w.id)
@@ -381,9 +375,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(retrieval_mod, "rank_papers", _boom)
 
         with pytest.raises(ValueError, match="ranking exploded"):
-            asyncio.get_event_loop().run_until_complete(
-                run_retrieval(theme, storage)
-            )
+            _run(run_retrieval(theme, storage))
 
         conn = storage._get_conn()
         row = conn.execute(
@@ -425,9 +417,7 @@ class TestRetrievalPipeline:
         monkeypatch.setattr(storage, "save_work", _flaky_save_work)
 
         with pytest.raises(sqlite3.OperationalError, match="simulated write failure"):
-            asyncio.get_event_loop().run_until_complete(
-                run_retrieval(theme, storage)
-            )
+            _run(run_retrieval(theme, storage))
 
         conn = storage._get_conn()
         works_count = conn.execute("SELECT COUNT(*) AS c FROM works").fetchone()["c"]
@@ -462,9 +452,7 @@ class TestRetrievalForDocument:
                             lambda _s: mock_connectors)
 
         doc = "This paper discusses reinforcement learning from human feedback and reward modeling."
-        theme, works = asyncio.get_event_loop().run_until_complete(
-            run_retrieval_for_document(doc, storage)
-        )
+        theme, works = _run(run_retrieval_for_document(doc, storage))
 
         assert theme.id
         assert theme.parsed_queries
