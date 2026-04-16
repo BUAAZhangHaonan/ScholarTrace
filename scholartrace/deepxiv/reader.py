@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.rag.ac.cn"
 _REGISTER_URL = f"{_BASE_URL}/api/register/sdk"
-_SDK_SECRET = "UuZp0i83svQU7_naUEexczc-X3NWv7lvNkD8e3sPyng"
 
 _DEFAULT_TIMEOUT = 30.0
 _MAX_RETRIES = 3
@@ -270,12 +269,17 @@ class DeepXivReader:
     # Registration
     # ------------------------------------------------------------------
     @staticmethod
-    async def register() -> str | None:
+    async def register(sdk_secret: str | None = None) -> str | None:
         """Auto-register a new DeepXiv account and return the token.
 
         Uses the SDK secret to create a random account.
         """
         import string
+
+        if not sdk_secret:
+            logger.error("DeepXiv registration refused: sdk secret is not configured")
+            return None
+
         suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
         username = f"deepxiv_{suffix}"
         email = f"{suffix}@example.com"
@@ -286,7 +290,7 @@ class DeepXivReader:
                 json={
                     "username": username,
                     "email": email,
-                    "sdk_secret": _SDK_SECRET,
+                    "sdk_secret": sdk_secret,
                 },
             )
             if resp.status_code != 200:

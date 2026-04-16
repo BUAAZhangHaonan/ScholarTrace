@@ -15,8 +15,8 @@ Usage:
     python examples/glm_scholar_search.py --limit 100
 
 Environment:
-    BIGMODEL_API_KEY — required, BigModel GLM API key
-    SCHOLARTRACE_API_URL — optional, defaults to http://localhost:8000
+    SCHOLARTRACE_BIGMODEL_API_KEY — required, BigModel GLM API key
+    SCHOLARTRACE_API_URL — optional, defaults to http://localhost:9000
 """
 
 import argparse
@@ -31,15 +31,31 @@ import httpx
 
 
 SCHOLARTRACE_URL = os.environ.get(
-    "SCHOLARTRACE_API_URL", "http://localhost:8000")
-BIGMODEL_API_KEY = os.environ.get(
-    "BIGMODEL_API_KEY",
-    "d177a2b9dd11494089bfaaae1d313c86.nen8jEX2bgDa6ViW",
-)
-BIGMODEL_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+    "SCHOLARTRACE_API_URL", "http://localhost:9000")
 DEFAULT_THEME_PATH = "docs/examples/sycophancy_affective_hallucination_research_brief.md"
 MAX_FULLTEXT_READS = 20
 CONCURRENT_REQUESTS = 5
+
+
+def get_bigmodel_api_key() -> str:
+    """Return the configured BigModel API key or fail closed."""
+    api_key = os.environ.get("SCHOLARTRACE_BIGMODEL_API_KEY", "").strip()
+    if api_key:
+        return api_key
+    raise RuntimeError(
+        "SCHOLARTRACE_BIGMODEL_API_KEY must be set to use GLM analysis",
+    )
+
+
+def get_bigmodel_url() -> str:
+    return os.environ.get(
+        "SCHOLARTRACE_BIGMODEL_BASE_URL",
+        "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+    )
+
+
+def get_bigmodel_model() -> str:
+    return os.environ.get("SCHOLARTRACE_BIGMODEL_MODEL", "glm-5-turbo")
 
 
 def load_theme(path: str | None = None) -> str:
@@ -150,6 +166,8 @@ def fetch_fulltexts_concurrent(
 
 def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
     """Use BigModel GLM to summarize and analyze papers."""
+    api_key = get_bigmodel_api_key()
+
     # Prepare paper summaries for the model
     paper_info = []
     for i, p in enumerate(papers[:20], 1):  # Top 20 for summary
@@ -174,13 +192,13 @@ def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
     )
 
     resp = httpx.post(
-        BIGMODEL_URL,
+        get_bigmodel_url(),
         headers={
-            "Authorization": f"Bearer {BIGMODEL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         json={
-            "model": "glm-5-turbo",
+            "model": get_bigmodel_model(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
         },
@@ -192,6 +210,8 @@ def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
 
 def interactive_mode(client: httpx.Client, papers: list[dict], theme_id: str):
     """Interactive mode: chat about papers, fetch full text on demand."""
+    api_key = get_bigmodel_api_key()
+
     print("\n" + "=" * 60)
     print(
         "Interactive Mode \u2014 ask about papers, type 'fulltext N' for paper N details"
@@ -248,13 +268,13 @@ def interactive_mode(client: httpx.Client, papers: list[dict], theme_id: str):
 
         try:
             resp = httpx.post(
-                BIGMODEL_URL,
+                get_bigmodel_url(),
                 headers={
-                    "Authorization": f"Bearer {BIGMODEL_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "glm-5-turbo",
+                    "model": get_bigmodel_model(),
                     "messages": messages,
                     "temperature": 0.7,
                 },
@@ -346,7 +366,7 @@ def main():
         print(f"  Retrieved {len(fulltexts)} full texts ({available} available)")
 
         # GLM summary
-        if not args.no_glm and BIGMODEL_API_KEY:
+        if not args.no_glm:
             print(f"\n{'=' * 60}")
             print("GLM ANALYSIS")
             print(f"{'=' * 60}")
@@ -355,6 +375,7 @@ def main():
                 print(summary)
             except Exception as e:
                 print(f"GLM call failed: {e}")
+                sys.exit(1)
 
         # Interactive mode
         if args.interactive:

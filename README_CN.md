@@ -12,7 +12,7 @@
 - **多目标排序**：相关性（TF-IDF）、时效性（指数衰减）、影响力（对数归一化引用）、期刊质量、开放获取加分、来源一致性
 - **全文获取级联**：arXiv HTML → arXiv PDF（PyMuPDF）→ OA URL → 仅摘要回退
 - **DeepXiv 集成**：混合 BM25 + 向量搜索、论文元数据与 TLDR、全文提取、基于 Agent 的智能筛选
-- **双接口**：REST API（FastAPI，端口 8000）和 MCP 服务器（SSE 传输，端口 8001）
+- **双接口**：REST API（FastAPI，端口 9000）和 MCP 服务器（SSE 传输，端口 8001）
 - **BigModel GLM 集成**：使用 `glm-5-turbo` 进行智能文献分析
 
 ## 快速开始
@@ -24,9 +24,12 @@ conda activate ScholarTrace
 
 # 安装
 cd ScholarTrace
-pip install -e ".[dev]"
+python -m pip install -r requirements-dev.txt
 
-# 配置 API 密钥
+# 运行环境检查
+scholartrace-check-env --include-dev --pytest-collect
+
+# 配置本地开发用 API 密钥
 cp .env.example .env
 # 编辑 .env 填入你的 API 密钥
 
@@ -35,15 +38,20 @@ pytest tests/ -v
 
 # 启动 REST API
 scholartrace-api
-# -> http://localhost:8000
+# -> http://localhost:9000
 
-# 启动 MCP 服务器（用于 LLM 客户端集成）
+# 启动 MCP 服务器（默认 stdio）
+scholartrace-mcp
+
+# 只有在配置访问令牌时才启用 SSE
+SCHOLARTRACE_MCP_TRANSPORT=sse \
+SCHOLARTRACE_ACCESS_TOKEN=change-me \
 scholartrace-mcp
 ```
 
 ## 配置（.env）
 
-所有配置使用 `SCHOLARTRACE_` 前缀。复制 `.env.example` 到 `.env` 并填入你的值。
+所有配置使用 `SCHOLARTRACE_` 前缀。复制 `.env.example` 到 `.env` 仅用于本地开发。部署服务时，请把密钥放在 `/etc/scholartrace/scholartrace.env` 或其他仓库外部文件中，并设置严格权限。
 
 | 变量 | 必需 | 默认值 | 说明 |
 |---|---|---|---|
@@ -51,10 +59,25 @@ scholartrace-mcp
 | `SCHOLARTRACE_OPENALEX_MAILTO` | 否 | | OpenAlex 礼貌池邮箱 |
 | `SCHOLARTRACE_CROSSREF_MAILTO` | 否 | | Crossref 礼貌池邮箱 |
 | `SCHOLARTRACE_API_HOST` | 否 | `127.0.0.1` | REST API 绑定地址 |
-| `SCHOLARTRACE_API_PORT` | 否 | `8000` | REST API 端口 |
-| `BIGMODEL_API_KEY` | 否 | | BigModel GLM API 密钥 |
-| `BIGMODEL_BASE_URL` | 否 | | BigModel GLM API 端点 |
-| `BIGMODEL_MODEL` | 否 | `glm-5-turbo` | GLM 模型名称 |
+| `SCHOLARTRACE_API_PORT` | 否 | `9000` | REST API 端口 |
+| `SCHOLARTRACE_MCP_HOST` | 否 | `127.0.0.1` | `SCHOLARTRACE_MCP_TRANSPORT=sse` 时的 MCP 绑定地址 |
+| `SCHOLARTRACE_MCP_PORT` | 否 | `8001` | MCP SSE 端口 |
+| `SCHOLARTRACE_MCP_TRANSPORT` | 否 | `stdio` | MCP 传输方式（`stdio` 或 `sse`） |
+| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | 否 | `false` | 只有设为 `true` 才允许非回环地址监听 |
+| `SCHOLARTRACE_ACCESS_TOKEN` | 远程时必需 | | REST 与 MCP SSE 共用 Bearer Token |
+| `SCHOLARTRACE_BIGMODEL_API_KEY` | 示例脚本需要 | | BigModel GLM API 密钥 |
+| `SCHOLARTRACE_BIGMODEL_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` | BigModel GLM API 地址 |
+| `SCHOLARTRACE_BIGMODEL_MODEL` | 否 | `glm-5-turbo` | GLM 模型名称 |
+| `SCHOLARTRACE_DEEPXIV_TOKENS` | DeepXiv 时需要 | | 逗号分隔的 DeepXiv Token |
+| `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER` | 否 | `false` | 是否显式启用 DeepXiv 自动注册 |
+| `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` | 自动注册时需要 | | 仅在自动注册开启时使用的 SDK Secret |
+
+### 网络暴露默认值
+
+- REST 默认只绑定 `127.0.0.1`。
+- MCP 默认是 `stdio`，不是网络 SSE。
+- 远程 REST 或 MCP SSE 启动时，如果没有 `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true` 和 `SCHOLARTRACE_ACCESS_TOKEN`，进程会直接拒绝启动。
+- REST 和 MCP 的客户端错误会返回稳定的安全结构，例如 `{"error":{"code":"not_found","message":"...","retryable":false}}`。
 
 ## REST API 端点
 
@@ -66,7 +89,7 @@ GET  /retrieval/jobs/{job_id}                   — 作业状态
 GET  /themes/{theme_id}/papers                  — 排序后的论文（分页）
 GET  /papers/{paper_id}                         — 论文元数据
 GET  /papers/{paper_id}/sections                — 章节级内容
-GET  /papers/{paper_id}/fulltext                — 全文访问（触发级联）
+GET  /papers/{paper_id}/fulltext                — 全文状态和已缓存内容
 GET  /themes/{theme_id}/export                  — 导出（JSON/Markdown）
 
 # DeepXiv 端点
@@ -105,7 +128,7 @@ MCP 服务器提供 12 个工具用于 LLM 代理集成：
 
 ### MCP 客户端配置
 
-MCP 服务器使用 SSE 传输，支持局域网访问。在 `.env` 中设置 `SCHOLARTRACE_MCP_HOST=0.0.0.0` 即可接受来自其他机器的连接。
+默认推荐 `stdio`。只有在你确实需要长期运行的网络端点时，才启用 SSE，并且必须配置访问令牌。
 
 **Claude Desktop** — 添加到 `claude_desktop_config.json`（本机）：
 
@@ -120,13 +143,26 @@ MCP 服务器使用 SSE 传输，支持局域网访问。在 `.env` 中设置 `S
 }
 ```
 
-**局域网 / 远程访问** — 通过 SSE URL 连接（网络中的任何机器）：
+**局域网 / 远程访问** — 显式启用 SSE，并要求 Bearer Token：
+
+```bash
+SCHOLARTRACE_MCP_TRANSPORT=sse \
+SCHOLARTRACE_MCP_HOST=0.0.0.0 \
+SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true \
+SCHOLARTRACE_ACCESS_TOKEN=change-me \
+scholartrace-mcp
+```
+
+然后通过 SSE URL 连接：
 
 ```json
 {
   "mcpServers": {
     "scholartrace": {
-      "url": "http://192.168.x.x:8001/sse"
+      "url": "http://127.0.0.1:8001/sse",
+      "headers": {
+        "Authorization": "Bearer change-me"
+      }
     }
   }
 }
@@ -140,7 +176,7 @@ DeepXiv（data.rag.ac.cn）提供增强的 arXiv 访问能力：
 - **论文元数据**：标题、摘要、作者、章节 TLDR
 - **全文提取**：完整的 Markdown 格式论文文本
 - **Semantic Scholar 代理**：通过 DeepXiv 免费访问 Semantic Scholar
-- **自动注册**：Token 池自动注册和轮换，无需手动配置
+- **自动注册**：默认关闭，只有显式配置后才会启用
 - **Agent 筛选**：使用 GLM 对论文进行相关性、新颖性、质量评分
 
 ```python
@@ -157,6 +193,8 @@ text = await reader.raw("2301.12345")
 agent = DeepXivAgent(api_key="your-key")
 filtered = await agent.filter_papers(papers, "研究问题")
 ```
+
+示例脚本 `examples/glm_scholar_search.py` 现在要求显式设置 `SCHOLARTRACE_BIGMODEL_API_KEY`，不会再使用仓库内置默认密钥。
 
 ## 架构
 
@@ -180,6 +218,8 @@ filtered = await agent.filter_papers(papers, "研究问题")
 ```bash
 # 安装服务
 sudo cp scripts/scholartrace-mcp.service /etc/systemd/system/
+sudo install -d -m 0750 /etc/scholartrace
+# 把密钥写入 /etc/scholartrace/scholartrace.env，并设置 0600 权限
 sudo systemctl daemon-reload
 sudo systemctl enable scholartrace-mcp
 sudo systemctl start scholartrace-mcp

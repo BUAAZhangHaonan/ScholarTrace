@@ -156,7 +156,13 @@ async def test_get_paper_metadata_not_found(test_storage):
 
     result_str = await get_paper_metadata("nonexistent-id")
     data = json.loads(result_str)
-    assert "error" in data
+    assert data == {
+        "error": {
+            "code": "not_found",
+            "message": "Paper nonexistent-id not found",
+            "retryable": False,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -319,4 +325,10 @@ async def test_export_theme_report_not_found(test_storage):
 
     result_str = await export_theme_report("nonexistent-theme")
     data = json.loads(result_str)
-    assert "error" in data
+    assert data == {
+        "error": {
+            "code": "not_found",
+            "message": "Theme nonexistent-theme not found",
+            "retryable": False,
+        }
+    }

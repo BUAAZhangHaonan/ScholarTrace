@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from scholartrace.api.rest import app
-from scholartrace.models.schemas import Work, Theme
+from scholartrace.models.schemas import AccessStatus, Artifact, ArtifactKind, Work, Theme
 from scholartrace.services.storage import StorageService
 
 
@@ -105,7 +106,11 @@ def test_get_paper_not_found(client: TestClient):
 def test_create_retrieval_job(client: TestClient):
     import scholartrace.api.rest as rest_module
     theme = _make_theme(rest_module._storage)
-    resp = client.post("/retrieval/jobs", data={"theme_id": theme.id})
+    with patch(
+        "scholartrace.services.retrieval.run_retrieval",
+        new=AsyncMock(return_value=[]),
+    ):
+        resp = client.post("/retrieval/jobs", data={"theme_id": theme.id})
     assert resp.status_code == 200
     data = resp.json()
     assert data["theme_id"] == theme.id
@@ -116,7 +121,11 @@ def test_get_job_status(client: TestClient):
     import scholartrace.api.rest as rest_module
     theme = _make_theme(rest_module._storage)
     # Create a job first
-    create_resp = client.post("/retrieval/jobs", data={"theme_id": theme.id})
+    with patch(
+        "scholartrace.services.retrieval.run_retrieval",
+        new=AsyncMock(return_value=[]),
+    ):
+        create_resp = client.post("/retrieval/jobs", data={"theme_id": theme.id})
     job_id = create_resp.json()["id"]
 
     resp = client.get(f"/retrieval/jobs/{job_id}")
@@ -157,3 +166,56 @@ def test_export_markdown(client: TestClient):
 def test_theme_not_found(client: TestClient):
     resp = client.get("/themes/nonexistent-id/papers")
     assert resp.status_code == 404
+
+
+def test_protected_route_requires_bearer_token_when_configured(client: TestClient):
+    import scholartrace.api.rest as rest_module
+
+    rest_module._settings.access_token = "phase1-secret"
+
+    unauth = client.get("/papers/nonexistent-id")
+    assert unauth.status_code == 401
+    assert unauth.json() == {
+        "error": {
+            "code": "unauthorized",
+            "message": "Authentication required",
+            "retryable": False,
+        }
+    }
+
+    health = client.get("/health")
+    assert health.status_code == 200
+
+    authed = client.get(
+        "/papers/nonexistent-id",
+        headers={"Authorization": "Bearer phase1-secret"},
+    )
+    assert authed.status_code == 404
+    assert authed.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Paper not found",
+            "retryable": False,
+        }
+    }
+
+
+def test_fulltext_response_redacts_local_path(client: TestClient):
+    import scholartrace.api.rest as rest_module
+
+    theme = _make_theme(rest_module._storage)
+    work = _make_work(rest_module._storage, title="Redacted Paper", theme_id=theme.id)
+    artifact = Artifact(
+        work_id=work.id,
+        kind=ArtifactKind.PDF,
+        source_url="https://example.com/paper.pdf",
+        local_path="/tmp/should-not-leak.pdf",
+        access_status=AccessStatus.AVAILABLE,
+    )
+    rest_module._storage.save_artifact(artifact)
+
+    resp = client.get(f"/papers/{work.id}/fulltext")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["artifacts"][0]["source_url"] == "https://example.com/paper.pdf"
+    assert "local_path" not in data["artifacts"][0]

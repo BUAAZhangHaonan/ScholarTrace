@@ -12,10 +12,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
 from typing import Any
 from fastapi.responses import PlainTextResponse
 
+from scholartrace.api.contracts import error_response, safe_http_exception_response
+from scholartrace.api.security import (
+    extract_access_token,
+    is_valid_access_token,
+    rest_auth_error_response,
+)
 from scholartrace.config import Settings, get_settings
 from scholartrace.jobs.manager import JobManager
 from scholartrace.models.schemas import RetrievalJob, Theme, Work
@@ -47,6 +53,35 @@ def _get_storage() -> StorageService:
 def _get_settings() -> Settings:
     _get_storage()  # ensures _settings is populated
     return _settings  # type: ignore[return-value]
+
+
+@app.middleware("http")
+async def require_access_token(request: Request, call_next):
+    settings = _get_settings()
+    if request.url.path == "/health" or not settings.access_token:
+        return await call_next(request)
+
+    provided = extract_access_token(request.headers)
+    if not is_valid_access_token(settings.access_token, provided):
+        return rest_auth_error_response(request)
+
+    return await call_next(request)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException):
+    return safe_http_exception_response(exc)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    logger.exception("Unhandled REST exception", exc_info=exc)
+    return error_response(
+        500,
+        "internal_error",
+        "Internal server error",
+        retryable=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +210,6 @@ def get_fulltext(paper_id: str) -> dict:
                 "id": a.id,
                 "kind": a.kind.value,
                 "source_url": a.source_url,
-                "local_path": a.local_path,
                 "access_status": a.access_status.value,
             }
         )

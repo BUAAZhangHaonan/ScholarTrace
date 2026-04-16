@@ -28,7 +28,7 @@ python -m pip install -r requirements-dev.txt
 # Verify imports and pytest collection before running the app
 scholartrace-check-env --include-dev --pytest-collect
 
-# Configure API keys
+# Configure API keys for local development
 cp .env.example .env
 # Edit .env with your API keys
 
@@ -39,7 +39,12 @@ pytest tests/ -v
 scholartrace-api
 # -> http://localhost:9000
 
-# Start MCP server (for LLM client integration)
+# Start MCP server over stdio (default)
+scholartrace-mcp
+
+# Start MCP over SSE only when you also set an access token
+SCHOLARTRACE_MCP_TRANSPORT=sse \
+SCHOLARTRACE_ACCESS_TOKEN=change-me \
 scholartrace-mcp
 ```
 
@@ -58,7 +63,7 @@ scholartrace-check-env --include-dev --pytest-collect
 
 ## Configuration (.env)
 
-All settings use the `SCHOLARTRACE_` prefix. Copy `.env.example` to `.env` and fill in your values.
+All settings use the `SCHOLARTRACE_` prefix. Copy `.env.example` to `.env` for local development only. For a deployed service, keep secrets in `/etc/scholartrace/scholartrace.env` or another external env file with restrictive permissions.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -67,11 +72,27 @@ All settings use the `SCHOLARTRACE_` prefix. Copy `.env.example` to `.env` and f
 | `SCHOLARTRACE_CROSSREF_MAILTO` | No | | Email for Crossref polite pool |
 | `SCHOLARTRACE_API_HOST` | No | `127.0.0.1` | REST API bind host |
 | `SCHOLARTRACE_API_PORT` | No | `9000` | REST API bind port |
+| `SCHOLARTRACE_MCP_HOST` | No | `127.0.0.1` | MCP SSE bind host when `SCHOLARTRACE_MCP_TRANSPORT=sse` |
+| `SCHOLARTRACE_MCP_PORT` | No | `8001` | MCP SSE bind port |
+| `SCHOLARTRACE_MCP_TRANSPORT` | No | `stdio` | MCP transport (`stdio` or `sse`) |
+| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | No | `false` | Must be `true` before binding REST or MCP SSE beyond loopback |
+| `SCHOLARTRACE_ACCESS_TOKEN` | Remote only | | Shared bearer token for REST and MCP SSE |
 | `SCHOLARTRACE_MAX_RESULTS_PER_SOURCE_PER_QUERY` | No | `200` | Results per source per query |
 | `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | No | `500` | Target total candidate papers |
 | `SCHOLARTRACE_MAX_FULLTEXT_DOWNLOADS` | No | `50` | Maximum full-text downloads per retrieval |
-| `BIGMODEL_API_KEY` | No | | BigModel GLM API key (for example script) |
-| `BIGMODEL_BASE_URL` | No | | BigModel GLM API endpoint |
+| `SCHOLARTRACE_BIGMODEL_API_KEY` | Example only | | BigModel GLM API key used by `examples/glm_scholar_search.py` |
+| `SCHOLARTRACE_BIGMODEL_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` | BigModel GLM API endpoint |
+| `SCHOLARTRACE_BIGMODEL_MODEL` | No | `glm-5-turbo` | BigModel GLM model name |
+| `SCHOLARTRACE_DEEPXIV_TOKENS` | DeepXiv only | | Comma-separated DeepXiv tokens |
+| `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER` | No | `false` | Opt-in auto-registration for DeepXiv |
+| `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` | Auto-register only | | DeepXiv SDK secret used only when auto-register is enabled |
+
+### Network Exposure Defaults
+
+- REST binds to `127.0.0.1` by default.
+- MCP defaults to `stdio`; SSE is opt-in.
+- Remote REST or MCP SSE startup is rejected unless `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true` and `SCHOLARTRACE_ACCESS_TOKEN` is set.
+- Client-facing REST and MCP errors use a stable safe shape like `{"error":{"code":"not_found","message":"...","retryable":false}}`.
 
 ### Ranking Weights (configurable)
 
@@ -94,7 +115,7 @@ GET  /retrieval/jobs/{job_id}         — Job status
 GET  /themes/{theme_id}/papers        — Ranked papers (paginated, ?limit=N)
 GET  /papers/{paper_id}              — Paper metadata
 GET  /papers/{paper_id}/sections     — Section-level content
-GET  /papers/{paper_id}/fulltext     — Full-text access (triggers cascade)
+GET  /papers/{paper_id}/fulltext     — Full-text status and cached content
 GET  /themes/{theme_id}/export       — Export (JSON/Markdown)
 
 # DeepXiv endpoints
@@ -107,7 +128,7 @@ POST /deepxiv/agent/filter            — Agent-filtered search (GLM scoring)
 
 ## MCP Server
 
-The MCP server provides 12 tools for LLM agent integration via SSE transport:
+The MCP server provides 12 tools for LLM agent integration. The default transport is `stdio`. SSE is available only when you opt in with `SCHOLARTRACE_MCP_TRANSPORT=sse` and set `SCHOLARTRACE_ACCESS_TOKEN`.
 
 | # | Tool | Description |
 |---|---|---|
@@ -126,7 +147,7 @@ The MCP server provides 12 tools for LLM agent integration via SSE transport:
 
 ### MCP Client Configuration
 
-The MCP server uses SSE transport for LAN access. Configure `SCHOLARTRACE_MCP_HOST=0.0.0.0` in `.env` to accept connections from other machines.
+`stdio` is the default and recommended local setup. Use SSE only when you need a long-running network endpoint and have an access token in place.
 
 **Claude Desktop** — add to `claude_desktop_config.json` (local machine):
 
@@ -141,19 +162,30 @@ The MCP server uses SSE transport for LAN access. Configure `SCHOLARTRACE_MCP_HO
 }
 ```
 
-**LAN / Remote access** — connect via SSE URL (from any machine on the network):
+**LAN / Remote access** — enable SSE explicitly and require a bearer token:
+
+```bash
+SCHOLARTRACE_MCP_TRANSPORT=sse \
+SCHOLARTRACE_MCP_HOST=0.0.0.0 \
+SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true \
+SCHOLARTRACE_ACCESS_TOKEN=change-me \
+scholartrace-mcp
+```
+
+Then connect via SSE URL:
 
 ```json
 {
   "mcpServers": {
     "scholartrace": {
-      "url": "http://192.168.x.x:8001/sse"
+      "url": "http://127.0.0.1:8001/sse",
+      "headers": {
+        "Authorization": "Bearer change-me"
+      }
     }
   }
 }
 ```
-
-Replace `192.168.x.x` with the actual server IP. The server binds to `0.0.0.0:8001` by default when `SCHOLARTRACE_MCP_HOST` is set in `.env`.
 
 ## Python API Usage
 
@@ -234,6 +266,7 @@ asyncio.run(search_papers())
 
 ```bash
 # Default: search with the bundled sycophancy research brief
+export SCHOLARTRACE_BIGMODEL_API_KEY=your-key
 python examples/glm_scholar_search.py
 
 # Custom query
@@ -252,6 +285,8 @@ The script workflow:
 3. Sends paper metadata to BigModel GLM for landscape analysis
 4. (Optional) Enters interactive mode for follow-up questions
 5. Exports results to `scholartrace_results.json`
+
+The example now fails closed if `SCHOLARTRACE_BIGMODEL_API_KEY` is missing instead of sending a baked-in fallback credential.
 
 ## Architecture
 

@@ -4,14 +4,31 @@ After=network.target
 
 [Service]
 Type=simple
-User=g203
-WorkingDirectory=/home/g203/zhanghaonan/ScholarTrace
-EnvironmentFile=/home/g203/zhanghaonan/ScholarTrace/.env
-ExecStart=/home/g203/miniconda3/envs/ScholarTrace/bin/scholartrace-mcp
+User=scholartrace
+Group=scholartrace
+WorkingDirectory=/opt/ScholarTrace
+EnvironmentFile=/etc/scholartrace/scholartrace.env
+Environment=SCHOLARTRACE_MCP_TRANSPORT=sse
+Environment=SCHOLARTRACE_MCP_HOST=127.0.0.1
+Environment=SCHOLARTRACE_DATA_DIR=/var/lib/scholartrace
+Environment=SCHOLARTRACE_DB_PATH=/var/lib/scholartrace/scholartrace.db
+ExecStart=/opt/miniconda3/envs/ScholarTrace/bin/scholartrace-mcp
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+StateDirectory=scholartrace
+ReadWritePaths=/var/lib/scholartrace
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

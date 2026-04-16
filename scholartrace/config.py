@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     # --- DeepXiv settings ---
     deepxiv_tokens: str = ""  # Comma-separated DeepXiv API tokens
     deepxiv_pool_size: int = 3
-    deepxiv_auto_register: bool = True
+    deepxiv_auto_register: bool = False
+    deepxiv_register_sdk_secret: str = ""
 
     # --- BigModel GLM settings ---
     bigmodel_api_key: str = ""
@@ -45,9 +46,12 @@ class Settings(BaseSettings):
 
     # --- Server settings ---
     api_host: str = "127.0.0.1"
-    api_port: int = 8000
+    api_port: int = 9000
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8001
+    mcp_transport: str = "stdio"
+    remote_access_enabled: bool = False
+    access_token: str = ""
 
     model_config = {
         "env_prefix": "SCHOLARTRACE_",

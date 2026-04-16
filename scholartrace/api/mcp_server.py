@@ -14,17 +14,38 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from functools import wraps
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from scholartrace.config import get_settings
+from scholartrace.api.contracts import tool_error_json
+from scholartrace.api.security import AccessTokenMiddleware
+from scholartrace.config import Settings, get_settings
 from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
+
+def create_mcp(settings: Settings | None = None) -> FastMCP:
+    runtime_settings = settings or get_settings()
+    return FastMCP(
+        "ScholarTrace",
+        host=runtime_settings.mcp_host,
+        port=runtime_settings.mcp_port,
+    )
+
+
+def create_mcp_sse_app(settings: Settings | None = None):
+    runtime_settings = settings or get_settings()
+    app = mcp.sse_app()
+    if runtime_settings.access_token:
+        return AccessTokenMiddleware(app, runtime_settings.access_token)
+    return app
+
+
 _settings = get_settings()
-mcp = FastMCP("ScholarTrace", host=_settings.mcp_host, port=_settings.mcp_port)
+mcp = create_mcp(_settings)
 
 # ---------------------------------------------------------------------------
 # Lazy-initialised storage singleton (overridable in tests)
@@ -98,10 +119,27 @@ def _work_summary(work: Any) -> dict[str, Any]:
     }
 
 
+def safe_tool(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception:
+            logger.exception("MCP tool %s failed", func.__name__)
+            return tool_error_json(
+                "internal_error",
+                "Internal server error",
+                retryable=False,
+            )
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@safe_tool
 async def search_papers_by_theme(theme_document: str) -> str:
     """Parse a theme document and run the full retrieval pipeline.
 
@@ -130,6 +168,7 @@ async def search_papers_by_theme(theme_document: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def get_ranked_papers(theme_id: str, limit: int = 50) -> str:
     """Get ranked papers for a theme from storage.
 
@@ -142,6 +181,7 @@ async def get_ranked_papers(theme_id: str, limit: int = 50) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def get_paper_metadata(paper_id: str) -> str:
     """Get full metadata for a single paper by its ID.
 
@@ -150,11 +190,12 @@ async def get_paper_metadata(paper_id: str) -> str:
     storage = _get_storage()
     work = storage.get_work(paper_id)
     if work is None:
-        return json.dumps({"error": f"Paper {paper_id} not found"})
+        return tool_error_json("not_found", f"Paper {paper_id} not found")
     return json.dumps(_work_to_dict(work), ensure_ascii=False)
 
 
 @mcp.tool()
+@safe_tool
 async def get_paper_sections(paper_id: str) -> str:
     """Get parsed sections for a paper by its ID.
 
@@ -163,7 +204,7 @@ async def get_paper_sections(paper_id: str) -> str:
     storage = _get_storage()
     work = storage.get_work(paper_id)
     if work is None:
-        return json.dumps({"error": f"Paper {paper_id} not found"})
+        return tool_error_json("not_found", f"Paper {paper_id} not found")
 
     sections = storage.get_sections_by_work(paper_id)
     section_list = [
@@ -179,6 +220,7 @@ async def get_paper_sections(paper_id: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def get_paper_fulltext(paper_id: str) -> str:
     """Get full-text status and content for a paper.
 
@@ -193,7 +235,7 @@ async def get_paper_fulltext(paper_id: str) -> str:
 
     work = storage.get_work(paper_id)
     if work is None:
-        return json.dumps({"error": f"Paper {paper_id} not found"})
+        return tool_error_json("not_found", f"Paper {paper_id} not found")
 
     # Attempt acquisition if not already done
     if not work.fulltext_available:
@@ -223,6 +265,7 @@ async def get_paper_fulltext(paper_id: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def get_related_papers(paper_id: str, limit: int = 10) -> str:
     """Find papers related to the given paper by shared venue and overlapping years.
 
@@ -231,7 +274,7 @@ async def get_related_papers(paper_id: str, limit: int = 10) -> str:
     storage = _get_storage()
     work = storage.get_work(paper_id)
     if work is None:
-        return json.dumps({"error": f"Paper {paper_id} not found"})
+        return tool_error_json("not_found", f"Paper {paper_id} not found")
 
     conn: sqlite3.Connection = storage._get_conn()
 
@@ -273,6 +316,7 @@ async def get_related_papers(paper_id: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def export_theme_report(theme_id: str, format: str = "json") -> str:
     """Export all papers for a theme as JSON or Markdown.
 
@@ -287,7 +331,7 @@ async def export_theme_report(theme_id: str, format: str = "json") -> str:
 
     theme = storage.get_theme(theme_id)
     if theme is None:
-        return json.dumps({"error": f"Theme {theme_id} not found"})
+        return tool_error_json("not_found", f"Theme {theme_id} not found")
 
     works = storage.list_works_by_theme(theme_id, limit=10000)
 
@@ -372,6 +416,7 @@ async def _get_deepxiv_agent() -> Any:
 
 
 @mcp.tool()
+@safe_tool
 async def deepxiv_search(
     query: str,
     max_results: int = 20,
@@ -420,6 +465,7 @@ async def deepxiv_search(
 
 
 @mcp.tool()
+@safe_tool
 async def deepxiv_paper_summary(arxiv_id: str) -> str:
     """Get paper metadata and TLDR summary from DeepXiv.
 
@@ -434,7 +480,7 @@ async def deepxiv_paper_summary(arxiv_id: str) -> str:
     brief = await connector.get_paper_brief(arxiv_id)
 
     if head is None and brief is None:
-        return json.dumps({"error": f"Paper {arxiv_id} not found on DeepXiv"})
+        return tool_error_json("not_found", f"Paper {arxiv_id} not found on DeepXiv")
 
     result = {}
     if head:
@@ -446,6 +492,7 @@ async def deepxiv_paper_summary(arxiv_id: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def deepxiv_paper_fulltext(arxiv_id: str) -> str:
     """Get full paper text in markdown from DeepXiv.
 
@@ -459,7 +506,7 @@ async def deepxiv_paper_fulltext(arxiv_id: str) -> str:
     text = await connector.get_fulltext(arxiv_id)
 
     if text is None:
-        return json.dumps({"error": f"Full text not available for {arxiv_id}"})
+        return tool_error_json("not_found", f"Full text not available for {arxiv_id}")
 
     return json.dumps({
         "arxiv_id": arxiv_id,
@@ -469,6 +516,7 @@ async def deepxiv_paper_fulltext(arxiv_id: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> str:
     """Get a specific section's content from DeepXiv.
 
@@ -483,7 +531,10 @@ async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> str:
     content = await connector.get_section(arxiv_id, section_name)
 
     if content is None:
-        return json.dumps({"error": f"Section '{section_name}' not found for {arxiv_id}"})
+        return tool_error_json(
+            "not_found",
+            f"Section '{section_name}' not found for {arxiv_id}",
+        )
 
     return json.dumps({
         "arxiv_id": arxiv_id,
@@ -493,6 +544,7 @@ async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> str:
 
 
 @mcp.tool()
+@safe_tool
 async def deepxiv_agent_filter(
     query: str,
     max_results: int = 20,
