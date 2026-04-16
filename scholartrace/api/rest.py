@@ -119,7 +119,9 @@ def create_retrieval_job(
         raise HTTPException(status_code=404, detail="Theme not found")
 
     job_manager = JobManager(storage)
-    job = job_manager.create_job(theme_id)
+    job, created = job_manager.create_or_get_active_job(theme_id, return_created=True)
+    if not created:
+        return job
 
     # Import here to avoid heavy module load at import time.
     from scholartrace.services.retrieval import run_retrieval

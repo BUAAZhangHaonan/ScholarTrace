@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -106,6 +107,7 @@ class TestJobLifecycle:
         from scholartrace.jobs.manager import JobManager
 
         storage = _tmp_storage(tmp_path)
+        storage.save_theme(Theme(id="theme-1", document_text="job theme"))
         mgr = JobManager(storage)
 
         job = mgr.create_job("theme-1")
@@ -128,6 +130,7 @@ class TestJobLifecycle:
         from scholartrace.jobs.manager import JobManager
 
         storage = _tmp_storage(tmp_path)
+        storage.save_theme(Theme(id="theme-2", document_text="job theme"))
         mgr = JobManager(storage)
 
         job = mgr.create_job("theme-2")
@@ -145,6 +148,18 @@ class TestJobLifecycle:
         storage = _tmp_storage(tmp_path)
         mgr = JobManager(storage)
         assert mgr.get_job("no-such-id") is None
+
+    def test_create_or_get_active_job_reuses_pending_job(self, tmp_path: Path) -> None:
+        from scholartrace.jobs.manager import JobManager
+
+        storage = _tmp_storage(tmp_path)
+        storage.save_theme(Theme(id="theme-3", document_text="job theme"))
+        mgr = JobManager(storage)
+
+        first = mgr.create_or_get_active_job("theme-3")
+        second = mgr.create_or_get_active_job("theme-3")
+
+        assert first.id == second.id
 
 
 class TestRetrievalPipeline:
@@ -207,19 +222,12 @@ class TestRetrievalPipeline:
         assert len(stored) == 4
         assert storage.count_works_by_theme(theme.id) == 4
 
-        # Job is completed
-        from scholartrace.jobs.manager import JobManager
-        mgr = JobManager(storage)
-        # The job was created inside run_retrieval; find it
-        import sqlite3
         conn = storage._get_conn()
         row = conn.execute(
-            "SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
-        assert row is not None
-        job = mgr.get_job(row["id"])
-        assert job is not None
-        assert job.status == JobStatus.COMPLETED
-        assert job.result_count == 4
+            "SELECT COUNT(*) AS c FROM jobs WHERE theme_id = ?",
+            (theme.id,),
+        ).fetchone()
+        assert row["c"] == 0
 
     def test_one_source_fails_others_succeed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """One connector raises; others still produce results."""
@@ -348,7 +356,7 @@ class TestRetrievalPipeline:
             assert fetched.doi == w.doi
 
     def test_catastrophic_failure_marks_job_failed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """If ranking raises, the job is marked FAILED with error_message."""
+        """If ranking raises, run_retrieval does not persist a job row."""
         storage = _tmp_storage(tmp_path)
         theme = _sample_theme()
 
@@ -377,14 +385,58 @@ class TestRetrievalPipeline:
                 run_retrieval(theme, storage)
             )
 
-        # Job should be FAILED
-        import sqlite3
         conn = storage._get_conn()
         row = conn.execute(
-            "SELECT * FROM jobs WHERE theme_id = ?", (theme.id,)).fetchone()
-        assert row is not None
-        assert row["status"] == "failed"
-        assert "ranking exploded" in row["error_message"]
+            "SELECT COUNT(*) AS c FROM jobs WHERE theme_id = ?",
+            (theme.id,),
+        ).fetchone()
+        assert row["c"] == 0
+
+    def test_persist_failure_rolls_back_all_work_state(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = _sample_theme()
+
+        cands = [
+            _make_candidate("Paper 1", doi="10.1/p1", openalex_id="W70"),
+            _make_candidate("Paper 2", doi="10.1/p2", openalex_id="W71"),
+        ]
+        mock_connectors = [
+            _make_mock_connector("openalex", cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+
+        original_save_work = storage.save_work
+        calls = {"count": 0}
+
+        def _flaky_save_work(work, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise sqlite3.OperationalError("simulated write failure")
+            return original_save_work(work, *args, **kwargs)
+
+        monkeypatch.setattr(storage, "save_work", _flaky_save_work)
+
+        with pytest.raises(sqlite3.OperationalError, match="simulated write failure"):
+            asyncio.get_event_loop().run_until_complete(
+                run_retrieval(theme, storage)
+            )
+
+        conn = storage._get_conn()
+        works_count = conn.execute("SELECT COUNT(*) AS c FROM works").fetchone()["c"]
+        links_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM theme_works WHERE theme_id = ?",
+            (theme.id,),
+        ).fetchone()["c"]
+        assert works_count == 0
+        assert links_count == 0
 
 
 class TestRetrievalForDocument:

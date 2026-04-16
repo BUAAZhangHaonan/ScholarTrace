@@ -277,42 +277,42 @@ async def get_related_papers(paper_id: str, limit: int = 10) -> str:
         return tool_error_json("not_found", f"Paper {paper_id} not found")
 
     conn: sqlite3.Connection = storage._get_conn()
+    try:
+        if work.venue and work.year:
+            # Same venue, +/- 2 years, excluding the paper itself
+            rows = conn.execute(
+                """
+                SELECT * FROM works
+                WHERE venue = ?
+                  AND year BETWEEN ? AND ?
+                  AND id != ?
+                ORDER BY composite_score DESC
+                LIMIT ?
+                """,
+                (work.venue, work.year - 2, work.year + 2, paper_id, limit),
+            ).fetchall()
+        elif work.venue:
+            rows = conn.execute(
+                """
+                SELECT * FROM works
+                WHERE venue = ?
+                  AND id != ?
+                ORDER BY composite_score DESC
+                LIMIT ?
+                """,
+                (work.venue, paper_id, limit),
+            ).fetchall()
+        else:
+            rows = []
 
-    if work.venue and work.year:
-        # Same venue, +/- 2 years, excluding the paper itself
-        rows = conn.execute(
-            """
-            SELECT * FROM works
-            WHERE venue = ?
-              AND year BETWEEN ? AND ?
-              AND id != ?
-            ORDER BY composite_score DESC
-            LIMIT ?
-            """,
-            (work.venue, work.year - 2, work.year + 2, paper_id, limit),
-        ).fetchall()
-    elif work.venue:
-        rows = conn.execute(
-            """
-            SELECT * FROM works
-            WHERE venue = ?
-              AND id != ?
-            ORDER BY composite_score DESC
-            LIMIT ?
-            """,
-            (work.venue, paper_id, limit),
-        ).fetchall()
-    else:
-        rows = []
+        related = []
+        for row in rows:
+            w = storage._row_to_work(row)
+            related.append(_work_summary(w))
 
-    from scholartrace.models.schemas import Work as WorkModel
-
-    related = []
-    for row in rows:
-        w = storage._row_to_work(row)
-        related.append(_work_summary(w))
-
-    return json.dumps(related, ensure_ascii=False)
+        return json.dumps(related, ensure_ascii=False)
+    finally:
+        conn.close()
 
 
 @mcp.tool()

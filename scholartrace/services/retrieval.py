@@ -13,7 +13,6 @@ from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openalex import OpenAlexConnector
 from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
-from scholartrace.jobs.manager import JobManager
 from scholartrace.models.schemas import RawCandidate, Theme, Work
 from scholartrace.services.dedup import deduplicate_candidates
 from scholartrace.services.ranking import rank_papers
@@ -87,18 +86,17 @@ async def run_retrieval(
     Steps:
     1. Fan out each parsed query across all 6 connectors concurrently.
     2. Aggregate, deduplicate, convert to Work objects.
-    3. Rank by composite score, persist to storage, link to theme.
+    3. Rank by composite score, persist to storage atomically, link to theme.
     4. Return the ranked list.
     """
     if settings is None:
         settings = get_settings()
 
     connectors = _build_connectors(settings)
-    job_mgr = JobManager(storage)
-    job = job_mgr.create_job(theme.id)
-    job_mgr.start_job(job.id)
 
     try:
+        storage.save_theme(theme)
+
         # --- Fan-out across queries and sources ---
         all_candidates: list[RawCandidate] = []
         for query in theme.parsed_queries:
@@ -123,30 +121,13 @@ async def run_retrieval(
         # --- Rank ---
         works = rank_papers(works, theme)
 
-        # --- Persist ---
-        for work in works:
-            storage.save_work(work)
+        works = storage.replace_theme_results(theme.id, works)
 
-        # --- Link works to theme with rank order ---
-        for rank_order, work in enumerate(works, start=1):
-            storage.link_theme_work(theme.id, work.id, rank_order)
-
-        # --- Update job stats ---
-        job_mgr.complete_job(job.id, result_count=len(works))
-
-        logger.info(
-            "Retrieval complete: %d works saved for theme %s",
-            len(works),
-            theme.id,
-        )
+        logger.info("Retrieval complete: %d works saved for theme %s", len(works), theme.id)
         return works
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Retrieval failed for theme %s", theme.id)
-        try:
-            job_mgr.fail_job(job.id, error_message=str(exc))
-        except Exception:
-            logger.exception("Failed to mark job %s as FAILED", job.id)
         raise
 
     finally:

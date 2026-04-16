@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -138,6 +140,137 @@ class TestWorkCRUD:
         assert fetched is not None
         assert fetched.title == "Updated Title"
 
+    @pytest.mark.parametrize(
+        ("field_name", "field_value"),
+        [
+            ("doi", "10.1000/phase2-doi"),
+            ("arxiv_id", "2401.12345"),
+            ("openalex_id", "W-phase2"),
+            ("s2_id", "S2-phase2"),
+            ("dblp_key", "conf/test/Phase2"),
+            ("openreview_id", "or-phase2"),
+        ],
+    )
+    def test_reingestion_preserves_work_identity_by_external_identifier(
+        self,
+        storage,
+        field_name: str,
+        field_value: str,
+    ):
+        original = Work(title="Original", **{field_name: field_value})
+        storage.save_work(original)
+
+        incoming = Work(title="Updated", authors=["Alice"], **{field_name: field_value})
+        saved = storage.save_work(incoming)
+
+        assert saved.id == original.id
+        assert storage.get_work(original.id) is not None
+        assert storage.get_work(incoming.id) is None
+        assert getattr(storage.get_work(original.id), field_name) == field_value
+
+    def test_reingestion_preserves_theme_links_artifacts_and_sections(self, storage):
+        theme = Theme(document_text="phase2 theme")
+        storage.save_theme(theme)
+
+        original = Work(title="Original", doi="10.1000/stable-link")
+        storage.save_work(original)
+        storage.link_theme_work(theme.id, original.id, 5)
+
+        artifact = Artifact(
+            work_id=original.id,
+            kind=ArtifactKind.PDF,
+            source_url="https://example.com/original.pdf",
+            access_status=AccessStatus.AVAILABLE,
+        )
+        section = Section(
+            work_id=original.id,
+            section_title="Intro",
+            section_order=0,
+            text_content="hello",
+        )
+        storage.save_artifact(artifact)
+        storage.save_section(section)
+
+        incoming = Work(
+            title="Updated",
+            doi="10.1000/stable-link",
+            arxiv_id="2402.00001",
+        )
+        saved = storage.save_work(incoming)
+
+        assert saved.id == original.id
+        linked = storage.list_works_by_theme(theme.id, limit=10)
+        assert [work.id for work in linked] == [original.id]
+        assert storage.get_artifacts_by_work(original.id)[0].work_id == original.id
+        assert storage.get_sections_by_work(original.id)[0].work_id == original.id
+
+    def test_repair_duplicate_logical_works_rewires_records_and_keeps_best_rank(self, storage):
+        conn = storage._get_conn()
+        conn.execute("DROP INDEX idx_works_doi")
+        conn.commit()
+
+        theme = Theme(document_text="repair theme")
+        storage.save_theme(theme)
+
+        first = Work(id="work-a", title="A", doi="10.1000/repair")
+        second = Work(id="work-b", title="B", doi="10.1000/repair", arxiv_id="2403.00002")
+        storage.save_work(first)
+        with storage.transaction(immediate=True) as tx:
+            storage._write_work_row(tx, second)
+        storage.link_theme_work(theme.id, first.id, 5)
+        storage.link_theme_work(theme.id, second.id, 2)
+        storage.save_artifact(
+            Artifact(
+                id="artifact-b",
+                work_id=second.id,
+                kind=ArtifactKind.PDF,
+                source_url="https://example.com/repair.pdf",
+            )
+        )
+        storage.save_section(
+            Section(
+                id="section-a",
+                work_id=first.id,
+                section_title="Intro",
+                section_order=0,
+                text_content="repair",
+            )
+        )
+
+        report = storage.repair_existing_work_state(apply=True)
+
+        assert report["clusters_repaired"] == 1
+        works = storage.list_works_by_theme(theme.id, limit=10)
+        assert len(works) == 1
+        canonical_id = works[0].id
+        raw_conn = storage._get_conn()
+        row = raw_conn.execute(
+            "SELECT rank_order FROM theme_works WHERE theme_id = ? AND work_id = ?",
+            (theme.id, canonical_id),
+        ).fetchone()
+        assert row is not None
+        assert row["rank_order"] == 2
+        assert raw_conn.execute("SELECT COUNT(*) AS c FROM works").fetchone()["c"] == 1
+        assert storage.get_artifacts_by_work(canonical_id)[0].work_id == canonical_id
+        assert storage.get_sections_by_work(canonical_id)[0].work_id == canonical_id
+
+    def test_concurrent_reingestion_keeps_single_work_row(self, storage):
+        def _save(idx: int) -> str:
+            work = Work(
+                title=f"Concurrent {idx}",
+                doi="10.1000/concurrent",
+                authors=[f"Author {idx}"],
+            )
+            return storage.save_work(work).id
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            ids = list(executor.map(_save, range(4)))
+
+        assert len(set(ids)) == 1
+        conn = storage._get_conn()
+        count = conn.execute("SELECT COUNT(*) AS c FROM works").fetchone()["c"]
+        assert count == 1
+
 
 class TestArtifactCRUD:
     def test_save_and_get_artifacts(self, storage):
@@ -249,3 +382,38 @@ class TestJobCRUD:
         assert fetched.status == JobStatus.COMPLETED
         assert fetched.candidate_count == 100
         assert fetched.result_count == 50
+
+    def test_get_active_job_by_theme(self, storage):
+        theme = Theme(document_text="job theme")
+        storage.save_theme(theme)
+        first = RetrievalJob(theme_id=theme.id, status=JobStatus.PENDING)
+        storage.save_job(first)
+
+        active = storage.get_active_job_by_theme(theme.id)
+        assert active is not None
+        assert active.id == first.id
+
+        storage.update_job_status(first.id, JobStatus.COMPLETED.value)
+        assert storage.get_active_job_by_theme(theme.id) is None
+
+    def test_concurrent_job_creation_reuses_one_active_job(self, storage):
+        theme = Theme(document_text="job theme")
+        storage.save_theme(theme)
+
+        from scholartrace.jobs.manager import JobManager
+
+        manager = JobManager(storage)
+
+        def _create() -> str:
+            return manager.create_or_get_active_job(theme.id).id
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            ids = list(executor.map(lambda _: _create(), range(4)))
+
+        assert len(set(ids)) == 1
+        conn = storage._get_conn()
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE theme_id = ?",
+            (theme.id,),
+        ).fetchone()["c"]
+        assert count == 1
