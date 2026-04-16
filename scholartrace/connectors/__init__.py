@@ -5,6 +5,7 @@ from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
 from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.crossref import CrossrefConnector
+from scholartrace.connectors.deepxiv_connector import DeepXivConnector
 
 __all__ = [
     "BaseConnector",
@@ -14,4 +15,5 @@ __all__ = [
     "DblpConnector",
     "OpenReviewConnector",
     "CrossrefConnector",
+    "DeepXivConnector",
 ]

@@ -1,4 +1,11 @@
-"""FastAPI REST API for ScholarTrace."""
+"""FastAPI REST API for ScholarTrace.
+
+Includes DeepXiv integration endpoints for:
+- /deepxiv/search — arXiv search via DeepXiv
+- /deepxiv/papers/{arxiv_id}/summary — paper metadata and TLDR
+- /deepxiv/papers/{arxiv_id}/fulltext — full paper text
+- /deepxiv/agent/filter — agent-filtered paper search
+"""
 
 from __future__ import annotations
 
@@ -6,6 +13,7 @@ import asyncio
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query
+from typing import Any
 from fastapi.responses import PlainTextResponse
 
 from scholartrace.config import Settings, get_settings
@@ -238,3 +246,152 @@ def export_theme(
         status_code=400,
         detail="Unsupported format. Use 'json' or 'markdown'.",
     )
+
+
+# ---------------------------------------------------------------------------
+# DeepXiv endpoints
+# ---------------------------------------------------------------------------
+_deepxiv_connector_rest: Any | None = None
+_deepxiv_agent_rest: Any | None = None
+
+
+def _get_deepxiv_rest() -> Any:
+    """Lazy-initialised DeepXivConnector singleton for REST API."""
+    global _deepxiv_connector_rest
+    if _deepxiv_connector_rest is None:
+        from scholartrace.connectors.deepxiv_connector import DeepXivConnector
+        _deepxiv_connector_rest = DeepXivConnector()
+    return _deepxiv_connector_rest
+
+
+def _get_deepxiv_agent_rest() -> Any:
+    """Lazy-initialised DeepXivAgent singleton for REST API."""
+    global _deepxiv_agent_rest
+    if _deepxiv_agent_rest is None:
+        s = _get_settings()
+        from scholartrace.deepxiv.agent import DeepXivAgent
+        _deepxiv_agent_rest = DeepXivAgent(
+            api_key=s.bigmodel_api_key,
+            base_url=s.bigmodel_base_url,
+            model=s.bigmodel_model,
+        )
+    return _deepxiv_agent_rest
+
+
+@app.post("/deepxiv/search")
+async def deepxiv_search(
+    query: str = Form(...),
+    max_results: int = Form(default=20),
+    search_mode: str = Form(default="hybrid"),
+    categories: str = Form(default=""),
+) -> dict:
+    """Search arXiv papers via DeepXiv."""
+    connector = _get_deepxiv_rest()
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+
+    candidates = await connector.search(
+        query,
+        max_results=min(max_results, 200),
+        search_mode=search_mode,
+        categories=cat_list,
+    )
+
+    papers = []
+    for c in candidates:
+        papers.append({
+            "title": c.title,
+            "authors": c.authors,
+            "year": c.year,
+            "abstract": c.abstract,
+            "arxiv_id": c.arxiv_id,
+            "doi": c.doi,
+            "citation_count": c.citation_count,
+        })
+
+    return {"total": len(papers), "papers": papers}
+
+
+@app.get("/deepxiv/papers/{arxiv_id}/summary")
+async def deepxiv_paper_summary(arxiv_id: str) -> dict:
+    """Get paper metadata and TLDR summary from DeepXiv."""
+    connector = _get_deepxiv_rest()
+    head = await connector.get_paper_metadata(arxiv_id)
+    brief = await connector.get_paper_brief(arxiv_id)
+
+    if head is None and brief is None:
+        raise HTTPException(status_code=404, detail=f"Paper {arxiv_id} not found on DeepXiv")
+
+    result: dict = {"arxiv_id": arxiv_id}
+    if head:
+        result["metadata"] = head
+    if brief:
+        result["brief"] = brief
+    return result
+
+
+@app.get("/deepxiv/papers/{arxiv_id}/fulltext")
+async def deepxiv_paper_fulltext(arxiv_id: str) -> dict:
+    """Get full paper text from DeepXiv."""
+    connector = _get_deepxiv_rest()
+    text = await connector.get_fulltext(arxiv_id)
+
+    if text is None:
+        raise HTTPException(status_code=404, detail=f"Full text not available for {arxiv_id}")
+
+    return {"arxiv_id": arxiv_id, "fulltext": text, "length": len(text)}
+
+
+@app.get("/deepxiv/papers/{arxiv_id}/sections/{section_name}")
+async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> dict:
+    """Get a specific section from a paper via DeepXiv."""
+    connector = _get_deepxiv_rest()
+    content = await connector.get_section(arxiv_id, section_name)
+
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Section '{section_name}' not found for {arxiv_id}",
+        )
+
+    return {"arxiv_id": arxiv_id, "section": section_name, "content": content}
+
+
+@app.post("/deepxiv/agent/filter")
+async def deepxiv_agent_filter(
+    query: str = Form(...),
+    max_results: int = Form(default=20),
+    search_mode: str = Form(default="hybrid"),
+) -> dict:
+    """Search arXiv via DeepXiv, then filter with GLM agent.
+
+    Returns only the most relevant papers with scores and explanations.
+    """
+    connector = _get_deepxiv_rest()
+    agent = _get_deepxiv_agent_rest()
+
+    candidates = await connector.search(
+        query,
+        max_results=min(max_results, 200),
+        search_mode=search_mode,
+    )
+
+    papers_for_agent = [
+        {
+            "title": c.title,
+            "abstract": c.abstract or "",
+            "arxiv_id": c.arxiv_id,
+            "authors": c.authors,
+            "year": c.year,
+            "citation_count": c.citation_count,
+        }
+        for c in candidates
+    ]
+
+    filtered = await agent.filter_papers(papers_for_agent, query)
+
+    return {
+        "query": query,
+        "total_searched": len(papers_for_agent),
+        "total_selected": len(filtered),
+        "papers": filtered,
+    }

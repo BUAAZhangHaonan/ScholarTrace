@@ -17,10 +17,10 @@ def run_api():
 
 
 def run_mcp():
-    """Entry point for the MCP server (stdio transport)."""
+    """Entry point for the MCP server (SSE transport for LAN access)."""
     from scholartrace.api.mcp_server import mcp
 
-    mcp.run()
+    mcp.run(transport="sse")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,12 @@
 """MCP (Model Context Protocol) server for ScholarTrace.
 
-Exposes 7 tools that LLM agents can call to search for papers,
+Exposes tools that LLM agents can call to search for papers,
 retrieve metadata, acquire full text, and export theme reports.
+
+Includes DeepXiv integration tools for:
+- DeepXiv arXiv search (hybrid BM25 + vector)
+- Paper summaries and full text via DeepXiv
+- Agent-based paper filtering via GLM
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("ScholarTrace")
+_settings = get_settings()
+mcp = FastMCP("ScholarTrace", host=_settings.mcp_host, port=_settings.mcp_port)
 
 # ---------------------------------------------------------------------------
 # Lazy-initialised storage singleton (overridable in tests)
@@ -333,3 +339,204 @@ async def export_theme_report(theme_id: str, format: str = "json") -> str:
         "papers": papers,
     }
     return json.dumps(report, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# DeepXiv tools
+# ---------------------------------------------------------------------------
+_deepxiv_connector: Any | None = None
+_deepxiv_agent: Any | None = None
+
+
+async def _get_deepxiv() -> Any:
+    """Lazy-initialised DeepXivConnector singleton."""
+    global _deepxiv_connector
+    if _deepxiv_connector is None:
+        from scholartrace.connectors.deepxiv_connector import DeepXivConnector
+        _deepxiv_connector = DeepXivConnector()
+    return _deepxiv_connector
+
+
+async def _get_deepxiv_agent() -> Any:
+    """Lazy-initialised DeepXivAgent singleton."""
+    global _deepxiv_agent
+    if _deepxiv_agent is None:
+        settings = get_settings()
+        from scholartrace.deepxiv.agent import DeepXivAgent
+        _deepxiv_agent = DeepXivAgent(
+            api_key=settings.bigmodel_api_key,
+            base_url=settings.bigmodel_base_url,
+            model=settings.bigmodel_model,
+        )
+    return _deepxiv_agent
+
+
+@mcp.tool()
+async def deepxiv_search(
+    query: str,
+    max_results: int = 20,
+    search_mode: str = "hybrid",
+    categories: str = "",
+    authors: str = "",
+) -> str:
+    """Search arXiv papers via DeepXiv (hybrid BM25 + vector search).
+
+    Parameters:
+        query: Search query string.
+        max_results: Maximum number of results (default 20, max 200).
+        search_mode: 'bm25', 'vector', or 'hybrid' (default).
+        categories: Comma-separated arXiv categories (e.g. 'cs.AI,cs.CL').
+        authors: Comma-separated author names.
+
+    Returns:
+        JSON string with paper summaries.
+    """
+    connector = await _get_deepxiv()
+
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+    auth_list = [a.strip() for a in authors.split(",") if a.strip()] or None
+
+    candidates = await connector.search(
+        query,
+        max_results=min(max_results, 200),
+        search_mode=search_mode,
+        categories=cat_list,
+        authors=auth_list,
+    )
+
+    papers = []
+    for c in candidates:
+        papers.append({
+            "title": c.title,
+            "authors": c.authors,
+            "year": c.year,
+            "abstract": (c.abstract or "")[:500],
+            "arxiv_id": c.arxiv_id,
+            "doi": c.doi,
+            "citation_count": c.citation_count,
+        })
+
+    return json.dumps({"total": len(papers), "papers": papers}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def deepxiv_paper_summary(arxiv_id: str) -> str:
+    """Get paper metadata and TLDR summary from DeepXiv.
+
+    Parameters:
+        arxiv_id: The arXiv paper ID (e.g. '2301.12345').
+
+    Returns:
+        JSON string with paper metadata including section TLDRs.
+    """
+    connector = await _get_deepxiv()
+    head = await connector.get_paper_metadata(arxiv_id)
+    brief = await connector.get_paper_brief(arxiv_id)
+
+    if head is None and brief is None:
+        return json.dumps({"error": f"Paper {arxiv_id} not found on DeepXiv"})
+
+    result = {}
+    if head:
+        result["head"] = head
+    if brief:
+        result["brief"] = brief
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def deepxiv_paper_fulltext(arxiv_id: str) -> str:
+    """Get full paper text in markdown from DeepXiv.
+
+    Parameters:
+        arxiv_id: The arXiv paper ID (e.g. '2301.12345').
+
+    Returns:
+        JSON string with the full text content.
+    """
+    connector = await _get_deepxiv()
+    text = await connector.get_fulltext(arxiv_id)
+
+    if text is None:
+        return json.dumps({"error": f"Full text not available for {arxiv_id}"})
+
+    return json.dumps({
+        "arxiv_id": arxiv_id,
+        "fulltext": text,
+        "length": len(text),
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def deepxiv_paper_section(arxiv_id: str, section_name: str) -> str:
+    """Get a specific section's content from DeepXiv.
+
+    Parameters:
+        arxiv_id: The arXiv paper ID.
+        section_name: Section name (e.g. 'introduction', 'method', 'conclusion').
+
+    Returns:
+        JSON string with the section content.
+    """
+    connector = await _get_deepxiv()
+    content = await connector.get_section(arxiv_id, section_name)
+
+    if content is None:
+        return json.dumps({"error": f"Section '{section_name}' not found for {arxiv_id}"})
+
+    return json.dumps({
+        "arxiv_id": arxiv_id,
+        "section": section_name,
+        "content": content,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def deepxiv_agent_filter(
+    query: str,
+    max_results: int = 20,
+    search_mode: str = "hybrid",
+) -> str:
+    """Search arXiv via DeepXiv, then filter papers using GLM agent.
+
+    The agent scores each paper on relevance, novelty, and quality,
+    returning only the most relevant papers with explanations.
+
+    Parameters:
+        query: Research question or topic.
+        max_results: Maximum papers to search (default 20).
+        search_mode: 'bm25', 'vector', or 'hybrid'.
+
+    Returns:
+        JSON string with filtered papers, scores, and reasons.
+    """
+    connector = await _get_deepxiv()
+    agent = await _get_deepxiv_agent()
+
+    candidates = await connector.search(
+        query,
+        max_results=min(max_results, 200),
+        search_mode=search_mode,
+    )
+
+    papers_for_agent = [
+        {
+            "title": c.title,
+            "abstract": c.abstract or "",
+            "arxiv_id": c.arxiv_id,
+            "authors": c.authors,
+            "year": c.year,
+            "citation_count": c.citation_count,
+        }
+        for c in candidates
+    ]
+
+    filtered = await agent.filter_papers(papers_for_agent, query)
+
+    return json.dumps({
+        "query": query,
+        "total_searched": len(papers_for_agent),
+        "total_selected": len(filtered),
+        "papers": filtered,
+    }, ensure_ascii=False)

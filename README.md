@@ -1,16 +1,18 @@
 # ScholarTrace
 
+**English** | [中文](README_CN.md)
+
 > Theme-guided multi-source scholarly paper discovery and full-text evidence access
 
 ## Features
 
-- **Multi-source retrieval** from 6 scholarly databases: OpenAlex, arXiv, Semantic Scholar, DBLP, OpenReview, Crossref
+- **Multi-source retrieval** from 7 scholarly databases: OpenAlex, arXiv, Semantic Scholar, DBLP, OpenReview, Crossref, DeepXiv
 - **Theme document parsing** — understands full research briefs, not just keywords
 - **Multi-key deduplication** — exact ID matching (DOI, arXiv ID, S2 ID, etc.) + fuzzy title matching (threshold 0.85)
 - **Multi-objective ranking** — relevance (TF-IDF), recency (exponential decay), influence (log-normalized citations), venue quality, open-access bonus, source agreement
 - **Full-text acquisition cascade** — arXiv HTML → arXiv PDF (PyMuPDF) → OA URL → abstract-only fallback
 - **Dual interface** — REST API (FastAPI, port 8000) and MCP server (stdio transport, port 8001)
-- **BigModel GLM integration** — example script for intelligent literature analysis with `glm-4-flash`
+- **BigModel GLM integration** — example script for intelligent literature analysis with `glm-5-turbo`
 
 ## Quick Start
 
@@ -78,11 +80,18 @@ GET  /papers/{paper_id}              — Paper metadata
 GET  /papers/{paper_id}/sections     — Section-level content
 GET  /papers/{paper_id}/fulltext     — Full-text access (triggers cascade)
 GET  /themes/{theme_id}/export       — Export (JSON/Markdown)
+
+# DeepXiv endpoints
+POST /deepxiv/search                  — Search arXiv via DeepXiv (BM25+vector)
+GET  /deepxiv/papers/{arxiv_id}/summary     — Paper summary & TLDR
+GET  /deepxiv/papers/{arxiv_id}/fulltext    — Full text from DeepXiv
+GET  /deepxiv/papers/{arxiv_id}/sections/{name} — Specific section
+POST /deepxiv/agent/filter            — Agent-filtered search (GLM scoring)
 ```
 
 ## MCP Server
 
-The MCP server provides 7 tools for LLM agent integration via stdio transport:
+The MCP server provides 12 tools for LLM agent integration via SSE transport:
 
 | # | Tool | Description |
 |---|---|---|
@@ -93,10 +102,17 @@ The MCP server provides 7 tools for LLM agent integration via stdio transport:
 | 5 | `get_paper_fulltext` | Full text (triggers download cascade) |
 | 6 | `get_related_papers` | Related papers by shared venue and year |
 | 7 | `export_theme_report` | Export full report as JSON or Markdown |
+| 8 | `deepxiv_search` | Search arXiv via DeepXiv (hybrid BM25 + vector) |
+| 9 | `deepxiv_paper_summary` | Paper metadata & TLDR from DeepXiv |
+| 10 | `deepxiv_paper_fulltext` | Full paper text (markdown) from DeepXiv |
+| 11 | `deepxiv_paper_section` | Specific section content from DeepXiv |
+| 12 | `deepxiv_agent_filter` | Agent-filtered search: GLM scores & filters papers |
 
 ### MCP Client Configuration
 
-**Claude Desktop** — add to `claude_desktop_config.json`:
+The MCP server uses SSE transport for LAN access. Configure `SCHOLARTRACE_MCP_HOST=0.0.0.0` in `.env` to accept connections from other machines.
+
+**Claude Desktop** — add to `claude_desktop_config.json` (local machine):
 
 ```json
 {
@@ -109,7 +125,19 @@ The MCP server provides 7 tools for LLM agent integration via stdio transport:
 }
 ```
 
-**ChatBox / Cursor / other MCP clients** — use the same pattern: point the command to `conda run -n ScholarTrace scholartrace-mcp`.
+**LAN / Remote access** — connect via SSE URL (from any machine on the network):
+
+```json
+{
+  "mcpServers": {
+    "scholartrace": {
+      "url": "http://192.168.x.x:8001/sse"
+    }
+  }
+}
+```
+
+Replace `192.168.x.x` with the actual server IP. The server binds to `0.0.0.0:8001` by default when `SCHOLARTRACE_MCP_HOST` is set in `.env`.
 
 ## Python API Usage
 
@@ -186,7 +214,7 @@ asyncio.run(search_papers())
 
 ## BigModel GLM Integration
 
-`examples/glm_scholar_search.py` combines ScholarTrace retrieval with BigModel GLM (`glm-4-flash`) for intelligent literature analysis:
+`examples/glm_scholar_search.py` combines ScholarTrace retrieval with BigModel GLM (`glm-5-turbo`) for intelligent literature analysis:
 
 ```bash
 # Default: search with the bundled sycophancy research brief
@@ -221,6 +249,7 @@ Theme Document → Theme Parser → Multi-Source Fan-Out → Dedup → Rank → 
                        │ DBLP            │
                        │ OpenReview      │
                        │ Crossref        │
+                       │ DeepXiv (BM25+V)│
                        └─────────────────┘
                                                     REST API (FastAPI) + MCP Server
 ```

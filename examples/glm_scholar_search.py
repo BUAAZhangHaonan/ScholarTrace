@@ -20,6 +20,7 @@ Environment:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -37,6 +38,8 @@ BIGMODEL_API_KEY = os.environ.get(
 )
 BIGMODEL_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
 DEFAULT_THEME_PATH = "docs/examples/sycophancy_affective_hallucination_research_brief.md"
+MAX_FULLTEXT_READS = 20
+CONCURRENT_REQUESTS = 5
 
 
 def load_theme(path: str | None = None) -> str:
@@ -100,6 +103,51 @@ def get_paper_fulltext(client: httpx.Client, paper_id: str) -> dict:
     return resp.json()
 
 
+def fetch_fulltexts_concurrent(
+    client: httpx.Client,
+    papers: list[dict],
+    max_reads: int = MAX_FULLTEXT_READS,
+    concurrency: int = CONCURRENT_REQUESTS,
+) -> list[dict]:
+    """Fetch full texts for top papers with concurrency control.
+
+    Args:
+        client: httpx client to use.
+        papers: List of paper dicts (must have 'id' key).
+        max_reads: Maximum number of full texts to fetch (default 20).
+        concurrency: Max concurrent requests (default 5).
+
+    Returns:
+        List of (paper_index, fulltext_data) tuples for successful fetches.
+    """
+    import concurrent.futures
+
+    targets = papers[:max_reads]
+    results: list[dict] = []
+
+    def _fetch_one(idx_paper: tuple[int, dict]) -> dict | None:
+        idx, paper = idx_paper
+        try:
+            ft = get_paper_fulltext(client, paper["id"])
+            return {"index": idx, "paper_id": paper["id"], "title": paper.get("title", ""), **ft}
+        except Exception as e:
+            print(f"  [warn] fulltext failed for {paper.get('title', '?')[:40]}: {e}")
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(_fetch_one, (i, p)): i
+            for i, p in enumerate(targets)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
+
+    results.sort(key=lambda r: r["index"])
+    return results
+
+
 def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
     """Use BigModel GLM to summarize and analyze papers."""
     # Prepare paper summaries for the model
@@ -132,9 +180,8 @@ def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            "model": "glm-4-flash",
+            "model": "glm-5-turbo",
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2000,
             "temperature": 0.7,
         },
         timeout=60,
@@ -207,9 +254,8 @@ def interactive_mode(client: httpx.Client, papers: list[dict], theme_id: str):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "glm-4-flash",
+                    "model": "glm-5-turbo",
                     "messages": messages,
-                    "max_tokens": 1000,
                     "temperature": 0.7,
                 },
                 timeout=30,
@@ -290,6 +336,14 @@ def main():
             score = p.get("composite_score", 0)
             title = p.get("title", "Untitled")[:70]
             print(f"  {i:2d}. [{score:.3f}] {title}... ({year}, {venue})")
+
+        # Concurrent full-text fetching (max 20 papers, 5 concurrent)
+        print(f"\n{'=' * 60}")
+        print(f"FETCHING FULL TEXTS (up to {MAX_FULLTEXT_READS}, {CONCURRENT_REQUESTS} concurrent)")
+        print(f"{'=' * 60}")
+        fulltexts = fetch_fulltexts_concurrent(client, papers)
+        available = sum(1 for ft in fulltexts if ft.get("fulltext_available"))
+        print(f"  Retrieved {len(fulltexts)} full texts ({available} available)")
 
         # GLM summary
         if not args.no_glm and BIGMODEL_API_KEY:

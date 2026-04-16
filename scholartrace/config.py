@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # --- API keys ---
     semantic_scholar_api_key: str = ""
+    semantic_scholar_api_keys: str = ""  # Comma-separated for multi-key rotation
     openalex_mailto: str = ""
     crossref_mailto: str = ""
 
@@ -31,6 +32,16 @@ class Settings(BaseSettings):
     weight_venue: float = 0.10
     weight_fulltext: float = 0.10
     weight_source_agreement: float = 0.05
+
+    # --- DeepXiv settings ---
+    deepxiv_tokens: str = ""  # Comma-separated DeepXiv API tokens
+    deepxiv_pool_size: int = 3
+    deepxiv_auto_register: bool = True
+
+    # --- BigModel GLM settings ---
+    bigmodel_api_key: str = ""
+    bigmodel_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+    bigmodel_model: str = "glm-5-turbo"
 
     # --- Server settings ---
     api_host: str = "127.0.0.1"

@@ -14,6 +14,7 @@ class SourceName(str, Enum):
     DBLP = "dblp"
     OPENREVIEW = "openreview"
     CROSSREF = "crossref"
+    DEEPXIV = "deepxiv"
 
 
 class ArtifactKind(str, Enum):
