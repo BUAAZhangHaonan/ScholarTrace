@@ -1,0 +1,17 @@
+[Unit]
+Description=ScholarTrace MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=g203
+WorkingDirectory=/home/g203/zhanghaonan/ScholarTrace
+EnvironmentFile=/home/g203/zhanghaonan/ScholarTrace/.env
+ExecStart=/home/g203/miniconda3/envs/ScholarTrace/bin/scholartrace-mcp
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
