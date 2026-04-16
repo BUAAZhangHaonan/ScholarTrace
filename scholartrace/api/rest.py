@@ -316,7 +316,7 @@ def _get_deepxiv_rest() -> Any:
     global _deepxiv_connector_rest
     if _deepxiv_connector_rest is None:
         from scholartrace.connectors.deepxiv_connector import DeepXivConnector
-        _deepxiv_connector_rest = DeepXivConnector()
+        _deepxiv_connector_rest = DeepXivConnector(settings=_get_settings())
     return _deepxiv_connector_rest
 
 

@@ -1,150 +1,197 @@
-"""Token pool for DeepXiv API access.
-
-Manages multiple DeepXiv tokens with:
-- Auto-registration of new accounts
-- Round-robin rotation
-- Automatic rotation on rate limit (429)
-- Async-safe via asyncio.Lock
-"""
+"""Token pool for DeepXiv API access."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+
+from scholartrace.config import Settings, get_settings
+from scholartrace.services import runtime_limits
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_COOLDOWN = timedelta(seconds=60)
+
+
+class TokenState(str, Enum):
+    ACTIVE = "active"
+    COOLDOWN = "cooldown"
+    DISABLED = "disabled"
 
 
 @dataclass
 class TokenInfo:
-    """Metadata for a single DeepXiv token."""
     token: str
     username: str = ""
-    is_active: bool = True
+    state: TokenState = TokenState.ACTIVE
     fail_count: int = 0
+    cooldown_until: datetime | None = None
 
 
 class TokenPool:
-    """Pool of DeepXiv API tokens with rotation and auto-registration.
-
-    Usage:
-        pool = TokenPool(initial_tokens=["token1", "token2"])
-        pool = TokenPool.from_env()  # reads DEEPXIV_TOKENS or DEEPXIV_TOKEN
-        pool = TokenPool(auto_register=True, pool_size=3)
-
-        token = await pool.get_token()    # get current best token
-        await pool.rotate()               # move to next token (on 429)
-    """
+    """Pool of DeepXiv tokens with proactive routing and explicit token state."""
 
     def __init__(
         self,
         initial_tokens: list[str] | None = None,
-        auto_register: bool = True,
+        *,
+        auto_register: bool = False,
         pool_size: int = 3,
+        register_sdk_secret: str = "",
     ):
         self._tokens: list[TokenInfo] = []
         self._index = 0
         self._lock = asyncio.Lock()
         self._auto_register = auto_register
         self._pool_size = pool_size
+        self._register_sdk_secret = register_sdk_secret
 
-        if initial_tokens:
-            for t in initial_tokens:
-                if t.strip():
-                    self._tokens.append(TokenInfo(token=t.strip()))
+        for token in initial_tokens or []:
+            if token.strip():
+                self._tokens.append(TokenInfo(token=token.strip()))
+
+    @classmethod
+    def from_settings(cls, settings: Settings | None = None) -> TokenPool:
+        runtime_settings = settings or get_settings()
+        tokens = [
+            token.strip()
+            for token in runtime_settings.deepxiv_tokens.split(",")
+            if token.strip()
+        ]
+        return cls(
+            initial_tokens=tokens,
+            auto_register=runtime_settings.deepxiv_auto_register,
+            pool_size=runtime_settings.deepxiv_pool_size,
+            register_sdk_secret=runtime_settings.deepxiv_register_sdk_secret,
+        )
 
     @classmethod
     def from_env(cls) -> TokenPool:
-        """Create pool from environment variables.
-
-        Reads DEEPXIV_TOKENS (comma-separated) or DEEPXIV_TOKEN (single).
-        """
-        tokens_str = os.environ.get("DEEPXIV_TOKENS", "")
-        if tokens_str:
-            tokens = [t.strip() for t in tokens_str.split(",") if t.strip()]
-        else:
-            single = os.environ.get("DEEPXIV_TOKEN", "")
-            tokens = [single] if single.strip() else []
-
-        return cls(initial_tokens=tokens)
+        """Compatibility helper that still uses canonical ScholarTrace settings."""
+        return cls.from_settings(get_settings())
 
     @property
     def size(self) -> int:
-        """Number of tokens in pool."""
         return len(self._tokens)
 
     @property
     def active_count(self) -> int:
-        """Number of active tokens."""
-        return sum(1 for t in self._tokens if t.is_active)
+        return sum(1 for token in self._tokens if token.state == TokenState.ACTIVE)
 
     async def get_token(self) -> str:
-        """Get the current best token.
-
-        If pool is empty and auto_register is enabled, registers new tokens.
-        If all tokens are inactive, re-activates the least-failed one.
-        """
         async with self._lock:
-            # Auto-register if pool is empty
-            if not self._tokens:
-                if self._auto_register:
-                    await self._register_fill()
-                else:
-                    raise RuntimeError("DeepXiv token pool is empty and auto_register is disabled")
+            await self._ensure_tokens_locked()
+            self._refresh_states_locked()
 
-            # Find the next active token
-            for _ in range(len(self._tokens)):
-                info = self._tokens[self._index]
-                if info.is_active:
-                    return info.token
-                self._index = (self._index + 1) % len(self._tokens)
+            for offset in range(len(self._tokens)):
+                index = (self._index + offset) % len(self._tokens)
+                info = self._tokens[index]
+                if info.state != TokenState.ACTIVE:
+                    continue
+                self._index = (index + 1) % len(self._tokens)
+                return info.token
 
-            # All inactive — reactivate the least-failed one
-            if self._tokens:
-                best = min(self._tokens, key=lambda t: t.fail_count)
-                best.is_active = True
-                self._index = self._tokens.index(best)
-                logger.info("Reactivated token %s (fail_count=%d)", best.username or "unknown", best.fail_count)
-                return best.token
+            if any(token.state == TokenState.COOLDOWN for token in self._tokens):
+                raise RuntimeError("All DeepXiv tokens are cooling down or disabled")
+            raise RuntimeError("No available DeepXiv tokens remain")
 
-            raise RuntimeError("DeepXiv token pool exhausted")
-
-    async def rotate(self) -> None:
-        """Move to the next token (call on 429 or auth error).
-
-        Marks the current token as failed and advances the pointer.
-        """
+    async def mark_success(self, token: str) -> None:
         async with self._lock:
-            if not self._tokens:
+            info = self._find_token_locked(token)
+            if info is None:
                 return
+            if info.state == TokenState.COOLDOWN and info.cooldown_until and info.cooldown_until <= datetime.utcnow():
+                info.state = TokenState.ACTIVE
+                info.cooldown_until = None
 
-            current = self._tokens[self._index]
-            current.fail_count += 1
+    async def mark_rate_limited(self, token: str, retry_after_seconds: int | None = None) -> None:
+        async with self._lock:
+            info = self._find_token_locked(token)
+            if info is None:
+                return
+            info.fail_count += 1
+            info.state = TokenState.COOLDOWN
+            info.cooldown_until = datetime.utcnow() + timedelta(
+                seconds=retry_after_seconds or _DEFAULT_COOLDOWN.total_seconds()
+            )
             logger.warning(
-                "Token %s failed (count=%d), rotating",
-                current.username or current.token[:8],
-                current.fail_count,
+                "DeepXiv token cooldown for %s until %s",
+                info.username or token[:8],
+                info.cooldown_until.isoformat(),
             )
 
-            self._index = (self._index + 1) % len(self._tokens)
+    async def mark_auth_failed(self, token: str) -> None:
+        async with self._lock:
+            info = self._find_token_locked(token)
+            if info is None:
+                return
+            info.fail_count += 1
+            info.state = TokenState.DISABLED
+            info.cooldown_until = None
+            logger.warning("DeepXiv token disabled for %s", info.username or token[:8])
 
-            # If pool is getting thin and auto_register is on, add more
-            active = self.active_count
-            if active < self._pool_size and self._auto_register:
-                await self._register_fill()
+    def _find_token_locked(self, token: str) -> TokenInfo | None:
+        for info in self._tokens:
+            if info.token == token:
+                return info
+        return None
 
-    async def _register_fill(self) -> None:
-        """Register new tokens up to pool_size."""
-        from .reader import DeepXivReader
+    def _refresh_states_locked(self) -> None:
+        now = datetime.utcnow()
+        for info in self._tokens:
+            if info.state == TokenState.COOLDOWN and info.cooldown_until and info.cooldown_until <= now:
+                info.state = TokenState.ACTIVE
+                info.cooldown_until = None
 
-        needed = self._pool_size - len(self._tokens)
-        for _ in range(min(needed, 2)):  # Register at most 2 at a time
-            token = await DeepXivReader.register()
-            if token:
-                self._tokens.append(TokenInfo(token=token))
-                logger.info("Auto-registered new DeepXiv token (pool now has %d)", len(self._tokens))
+    async def _ensure_tokens_locked(self) -> None:
+        self._refresh_states_locked()
+        if self._tokens and any(token.state == TokenState.ACTIVE for token in self._tokens):
+            if self._auto_register and self.active_count < self._pool_size:
+                await self._register_fill_locked()
+                self._refresh_states_locked()
+                if any(token.state == TokenState.ACTIVE for token in self._tokens):
+                    return
             else:
-                logger.warning("Auto-registration failed")
+                return
+
+        if self._auto_register and self.active_count < self._pool_size:
+            await self._register_fill_locked()
+            self._refresh_states_locked()
+
+        if self._tokens:
+            return
+
+        if self._auto_register and not self._register_sdk_secret:
+            raise RuntimeError(
+                "SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET is required when SCHOLARTRACE_DEEPXIV_AUTO_REGISTER=true",
+            )
+        raise RuntimeError(
+            "DeepXiv is not configured. Set SCHOLARTRACE_DEEPXIV_TOKENS or enable SCHOLARTRACE_DEEPXIV_AUTO_REGISTER with SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET.",
+        )
+
+    async def _register_fill_locked(self) -> None:
+        if not self._auto_register:
+            return
+        if not self._register_sdk_secret:
+            raise RuntimeError(
+                "SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET is required when SCHOLARTRACE_DEEPXIV_AUTO_REGISTER=true",
+            )
+
+        from scholartrace.deepxiv.reader import DeepXivReader
+
+        needed = max(1, self._pool_size - self.active_count)
+        for _ in range(needed):
+            logger.info("Attempting explicit DeepXiv auto-registration")
+            async with runtime_limits.budget_manager.enforce(
+                runtime_limits.AUTO_REGISTER_POLICY,
+                "deepxiv-auto-register",
+            ):
+                token = await DeepXivReader.register(self._register_sdk_secret)
+            if not token:
+                logger.warning("DeepXiv auto-registration failed")
                 break
+            self._tokens.append(TokenInfo(token=token))
+            logger.info("Registered new DeepXiv token; pool size is now %d", len(self._tokens))

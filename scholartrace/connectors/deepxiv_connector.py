@@ -31,7 +31,7 @@ class DeepXivConnector(BaseConnector):
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
-        self._reader = DeepXivReader()
+        self._reader = DeepXivReader(settings=self._settings)
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,6 +74,8 @@ class DeepXivConnector(BaseConnector):
                     categories=categories,
                     authors=authors,
                 )
+            except RuntimeError:
+                raise
             except Exception:
                 logger.exception("DeepXiv search failed at offset %d", offset)
                 break
@@ -98,6 +100,8 @@ class DeepXivConnector(BaseConnector):
         """Get paper metadata (head) from DeepXiv."""
         try:
             return await self._reader.head(arxiv_id)
+        except RuntimeError:
+            raise
         except Exception:
             logger.exception("DeepXiv head failed for %s", arxiv_id)
             return None
@@ -106,6 +110,8 @@ class DeepXivConnector(BaseConnector):
         """Get brief paper info from DeepXiv."""
         try:
             return await self._reader.brief(arxiv_id)
+        except RuntimeError:
+            raise
         except Exception:
             logger.exception("DeepXiv brief failed for %s", arxiv_id)
             return None
@@ -114,6 +120,8 @@ class DeepXivConnector(BaseConnector):
         """Get full paper text in markdown from DeepXiv."""
         try:
             return await self._reader.raw(arxiv_id)
+        except RuntimeError:
+            raise
         except Exception:
             logger.exception("DeepXiv raw failed for %s", arxiv_id)
             return None
@@ -122,6 +130,8 @@ class DeepXivConnector(BaseConnector):
         """Get a specific section's content from DeepXiv."""
         try:
             return await self._reader.section(arxiv_id, section_name)
+        except RuntimeError:
+            raise
         except Exception:
             logger.exception("DeepXiv section failed for %s/%s", arxiv_id, section_name)
             return None
@@ -130,6 +140,8 @@ class DeepXivConnector(BaseConnector):
         """Get paper preview from DeepXiv."""
         try:
             return await self._reader.preview(arxiv_id)
+        except RuntimeError:
+            raise
         except Exception:
             logger.exception("DeepXiv preview failed for %s", arxiv_id)
             return None
@@ -141,9 +153,12 @@ class DeepXivConnector(BaseConnector):
         fields: str = "title,abstract,year,citationCount,externalIds",
     ) -> dict[str, Any]:
         """Search Semantic Scholar via DeepXiv proxy."""
-        return await self._reader.semantic_scholar_search(
-            query, limit=limit, fields=fields,
-        )
+        try:
+            return await self._reader.semantic_scholar_search(
+                query, limit=limit, fields=fields,
+            )
+        except RuntimeError:
+            raise
 
     async def get_fulltext_url(self, paper_id: str) -> str | None:
         """DeepXiv doesn't provide direct fulltext URLs; use get_fulltext instead."""

@@ -54,6 +54,11 @@ mcp = create_mcp(_settings)
 _storage: StorageService | None = None
 
 
+def _get_settings() -> Settings:
+    global _settings
+    return _settings
+
+
 def _get_storage() -> StorageService:
     global _storage
     if _storage is None:
@@ -396,7 +401,7 @@ async def _get_deepxiv() -> Any:
     global _deepxiv_connector
     if _deepxiv_connector is None:
         from scholartrace.connectors.deepxiv_connector import DeepXivConnector
-        _deepxiv_connector = DeepXivConnector()
+        _deepxiv_connector = DeepXivConnector(settings=_get_settings())
     return _deepxiv_connector
 
 
@@ -404,7 +409,7 @@ async def _get_deepxiv_agent() -> Any:
     """Lazy-initialised DeepXivAgent singleton."""
     global _deepxiv_agent
     if _deepxiv_agent is None:
-        settings = get_settings()
+        settings = _get_settings()
         from scholartrace.deepxiv.agent import DeepXivAgent
         _deepxiv_agent = DeepXivAgent(
             api_key=settings.bigmodel_api_key,

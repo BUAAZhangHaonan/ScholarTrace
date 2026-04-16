@@ -84,6 +84,9 @@ class DeepXivAgent:
         """
         if not papers:
             return []
+        if not self._api_key:
+            logger.error("DeepXiv agent filtering refused: BigModel API key is not configured")
+            return []
 
         # Step 1: Filter based on title + abstract
         filter_results = await self._call_llm_filter(papers, question)
@@ -172,13 +175,20 @@ class DeepXivAgent:
             logger.error("Failed to parse LLM filter response: %s", e)
             return self._default_filter(len(papers))
         except httpx.HTTPStatusError as e:
-            logger.error("GLM API error: %s %s", e.response.status_code, e.response.text[:200])
+            logger.error("GLM API error: %s", e.response.status_code)
             return self._default_filter(len(papers))
 
     @staticmethod
     def _default_filter(count: int) -> list[dict[str, Any]]:
-        """Fallback: select all papers with moderate scores."""
+        """Safe degraded fallback: select nothing when filtering fails."""
         return [
-            {"index": i, "selected": True, "relevance": 5, "novelty": 5, "quality": 5, "reason": "Default selection"}
+            {
+                "index": i,
+                "selected": False,
+                "relevance": 0,
+                "novelty": 0,
+                "quality": 0,
+                "reason": "Filtering unavailable",
+            }
             for i in range(count)
         ]

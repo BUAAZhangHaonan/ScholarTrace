@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from scholartrace.config import Settings, get_settings
+
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://data.rag.ac.cn"
@@ -67,22 +69,30 @@ class DeepXivReader:
     def __init__(
         self,
         token_or_pool: str | Any | None = None,
+        *,
+        settings: Settings | None = None,
     ):
         """Initialize the reader.
 
         Args:
             token_or_pool: Either a single token string, a TokenPool instance,
-                           or None (will try env var DEEPXIV_TOKEN).
+                           or None (will use ScholarTrace DeepXiv settings).
         """
         # Import here to avoid circular dependency
         from .token_pool import TokenPool
 
+        runtime_settings = settings or get_settings()
         if isinstance(token_or_pool, TokenPool):
             self._pool = token_or_pool
         elif isinstance(token_or_pool, str) and token_or_pool:
-            self._pool = TokenPool(initial_tokens=[token_or_pool])
+            self._pool = TokenPool(
+                initial_tokens=[token_or_pool],
+                auto_register=runtime_settings.deepxiv_auto_register,
+                pool_size=runtime_settings.deepxiv_pool_size,
+                register_sdk_secret=runtime_settings.deepxiv_register_sdk_secret,
+            )
         else:
-            self._pool = TokenPool.from_env()
+            self._pool = TokenPool.from_settings(runtime_settings)
 
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
@@ -113,26 +123,30 @@ class DeepXivReader:
         last_error: Exception | None = None
 
         for attempt in range(_MAX_RETRIES):
-            headers = await self._headers()
+            token = await self._pool.get_token()
+            headers = {"Authorization": f"Bearer {token}"}
             try:
                 resp = await self._client.request(
                     method, url, json=json, params=params, headers=headers,
                 )
                 if resp.status_code == 429:
-                    # Rotate token and retry
-                    await self._pool.rotate()
+                    retry_after = None
+                    header_value = resp.headers.get("retry-after")
+                    if header_value and header_value.isdigit():
+                        retry_after = int(header_value)
+                    await self._pool.mark_rate_limited(token, retry_after)
                     backoff = _BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.5)
                     logger.warning(
-                        "DeepXiv rate limit, rotating token, retry %.1fs", backoff,
+                        "DeepXiv rate limit, retry %.1fs", backoff,
                     )
                     await asyncio.sleep(backoff)
                     continue
                 _raise_for_status(resp)
+                await self._pool.mark_success(token)
                 return resp
             except DeepXivAuthError:
-                # Bad token, rotate immediately
-                await self._pool.rotate()
-                logger.warning("DeepXiv auth error, rotating token")
+                await self._pool.mark_auth_failed(token)
+                logger.warning("DeepXiv auth error, disabling token")
                 if attempt == _MAX_RETRIES - 1:
                     raise
                 continue
