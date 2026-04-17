@@ -29,6 +29,8 @@ from pathlib import Path
 
 import httpx
 
+from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET, PromptBudget
+
 
 SCHOLARTRACE_URL = os.environ.get(
     "SCHOLARTRACE_API_URL", "http://localhost:9000")
@@ -113,19 +115,37 @@ def get_paper_detail(client: httpx.Client, paper_id: str) -> dict:
 
 
 def get_paper_fulltext(client: httpx.Client, paper_id: str) -> dict:
-    """Get full text for a paper."""
+    """Read cached full-text state for a paper."""
     resp = client.get(f"{SCHOLARTRACE_URL}/papers/{paper_id}/fulltext")
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_fulltexts_concurrent(
+def acquire_paper_fulltext(client: httpx.Client, paper_id: str) -> dict:
+    """Explicitly acquire full text for a paper."""
+    resp = client.post(f"{SCHOLARTRACE_URL}/papers/{paper_id}/fulltext/acquire")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def ensure_paper_fulltext(client: httpx.Client, paper: dict) -> dict:
+    """Read cache, acquire on miss, then re-read cached state."""
+    cached = get_paper_fulltext(client, paper["id"])
+    if not cached.get("needs_acquisition"):
+        return {"title": paper.get("title", ""), **cached}
+
+    acquire_paper_fulltext(client, paper["id"])
+    refreshed = get_paper_fulltext(client, paper["id"])
+    return {"title": paper.get("title", ""), **refreshed}
+
+
+def ensure_fulltexts_concurrent(
     client: httpx.Client,
     papers: list[dict],
     max_reads: int = MAX_FULLTEXT_READS,
     concurrency: int = CONCURRENT_REQUESTS,
 ) -> list[dict]:
-    """Fetch full texts for top papers with concurrency control.
+    """Ensure cached full text for top papers with concurrency control.
 
     Args:
         client: httpx client to use.
@@ -134,7 +154,7 @@ def fetch_fulltexts_concurrent(
         concurrency: Max concurrent requests (default 5).
 
     Returns:
-        List of (paper_index, fulltext_data) tuples for successful fetches.
+        List of cached-state payloads after optional explicit acquire.
     """
     import concurrent.futures
 
@@ -144,7 +164,7 @@ def fetch_fulltexts_concurrent(
     def _fetch_one(idx_paper: tuple[int, dict]) -> dict | None:
         idx, paper = idx_paper
         try:
-            ft = get_paper_fulltext(client, paper["id"])
+            ft = ensure_paper_fulltext(client, paper)
             return {"index": idx, "paper_id": paper["id"], "title": paper.get("title", ""), **ft}
         except Exception as e:
             print(f"  [warn] fulltext failed for {paper.get('title', '?')[:40]}: {e}")
@@ -164,33 +184,148 @@ def fetch_fulltexts_concurrent(
     return results
 
 
-def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
-    """Use BigModel GLM to summarize and analyze papers."""
-    api_key = get_bigmodel_api_key()
+def fetch_fulltexts_concurrent(
+    client: httpx.Client,
+    papers: list[dict],
+    max_reads: int = MAX_FULLTEXT_READS,
+    concurrency: int = CONCURRENT_REQUESTS,
+) -> list[dict]:
+    """Backward-compatible alias for the explicit acquire flow."""
+    return ensure_fulltexts_concurrent(client, papers, max_reads, concurrency)
 
-    # Prepare paper summaries for the model
-    paper_info = []
-    for i, p in enumerate(papers[:20], 1):  # Top 20 for summary
-        info = f"{i}. {p.get('title', 'Untitled')}\n"
-        info += f"   Year: {p.get('year', '?')}, Venue: {p.get('venue', '?')}\n"
-        info += f"   Score: {p.get('composite_score', 0):.3f}\n"
-        if p.get("abstract"):
-            info += f"   Abstract: {p['abstract'][:300]}...\n"
-        paper_info.append(info)
 
-    prompt = (
-        f"You are an expert research assistant. Analyze the following "
-        f"{len(papers)} papers retrieved for this research theme:\n\n"
-        f"THEME: {theme_text[:500]}\n\n"
-        f"TOP PAPERS:\n{chr(10).join(paper_info)}\n\n"
-        f"Please provide:\n"
-        f"1. A brief overview of the research landscape (2-3 sentences)\n"
-        f"2. The top 10 most important papers with one-line summaries\n"
-        f"3. Key research trends you observe\n"
-        f"4. Research gaps or opportunities\n\n"
-        f"Keep the response concise and actionable."
+def _paper_summary_line(paper: dict, index: int, budget: PromptBudget) -> str:
+    abstract = budget.truncate_text(paper.get("abstract") or "", 700)
+    return (
+        f"{index}. {paper.get('title', 'Untitled')}\n"
+        f"   Year: {paper.get('year', '?')}, Venue: {paper.get('venue', '?')}\n"
+        f"   Score: {paper.get('composite_score', 0):.3f}\n"
+        f"   Abstract: {abstract}\n"
     )
 
+
+def build_summary_messages(
+    papers: list[dict],
+    theme_text: str,
+    budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+) -> list[dict]:
+    """Build one bounded GLM summary request from the first packed batch."""
+    batches = build_summary_request_batches(papers, theme_text, budget=budget)
+    return batches[0] if batches else [{"role": "user", "content": ""}]
+
+
+def build_summary_request_batches(
+    papers: list[dict],
+    theme_text: str,
+    budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+) -> list[list[dict]]:
+    """Build bounded GLM summary requests that cover all packed paper batches."""
+    theme_text = budget.truncate_text(theme_text, 4_000)
+    intro = (
+        f"You are an expert research assistant. Analyze the following "
+        f"{len(papers)} papers retrieved for this research theme:\n\n"
+        f"THEME: {theme_text}\n\n"
+        f"TOP PAPERS:\n"
+    )
+    outro = (
+        "\n\nPlease provide:\n"
+        "1. A brief overview of the research landscape (2-3 sentences)\n"
+        "2. The top 10 most important papers with one-line summaries\n"
+        "3. Key research trends you observe\n"
+        "4. Research gaps or opportunities\n\n"
+        "Keep the response concise and actionable."
+    )
+    paper_lines = [
+        _paper_summary_line(paper, index, budget)
+        for index, paper in enumerate(papers, 1)
+    ]
+    batches = budget.pack_items(
+        paper_lines,
+        fixed_messages=[],
+        prefix=intro,
+        suffix=outro,
+    )
+    return [
+        [{"role": "user", "content": intro + "\n".join(batch) + outro}]
+        for batch in batches
+    ] or [[{"role": "user", "content": intro + outro}]]
+
+
+def build_interactive_system_prompt(
+    papers: list[dict],
+    budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+) -> str:
+    intro = (
+        f"You are a research assistant. Here are {len(papers)} papers:\n"
+    )
+    outro = (
+        "\n\nAnswer questions about these papers. "
+        "Use cached full-text status when available. "
+        "If the user wants network retrieval, tell them to run 'acquire N'."
+    )
+    paper_lines = [
+        (
+            f"[{i}] {p['title']} "
+            f"({p.get('year', '?')}, {p.get('venue', '?')}, "
+            f"score={p.get('composite_score', 0):.3f})"
+        )
+        for i, p in enumerate(papers[:50])
+    ]
+    batches = budget.pack_items(
+        paper_lines,
+        prefix=intro,
+        suffix=outro,
+    )
+    return intro + "\n".join(batches[0]) + outro if batches else intro + outro
+
+
+def prepare_chat_messages(
+    messages: list[dict],
+    budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+) -> list[dict]:
+    return budget.trim_messages(messages, preserve=1)
+
+
+def summarize_with_glm(
+    papers: list[dict],
+    theme_text: str,
+    budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+) -> str:
+    """Use BigModel GLM to summarize and analyze papers."""
+    api_key = get_bigmodel_api_key()
+    batch_messages = build_summary_request_batches(papers, theme_text, budget=budget)
+    batch_findings: list[str] = []
+
+    for messages in batch_messages:
+        resp = httpx.post(
+            get_bigmodel_url(),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": get_bigmodel_model(),
+                "messages": messages,
+                "temperature": 0.7,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        batch_findings.append(resp.json()["choices"][0]["message"]["content"])
+
+    if len(batch_findings) == 1:
+        return batch_findings[0]
+
+    synthesis_messages = [
+        {
+            "role": "user",
+            "content": budget.truncate_text(
+                "You are an expert research assistant. Merge the batch findings below into one final answer.\n\n"
+                f"Batch Findings:\n{chr(10).join(f'- {finding}' for finding in batch_findings)}",
+                budget.max_input_tokens - 512,
+            ),
+        }
+    ]
     resp = httpx.post(
         get_bigmodel_url(),
         headers={
@@ -199,7 +334,7 @@ def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
         },
         json={
             "model": get_bigmodel_model(),
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": synthesis_messages,
             "temperature": 0.7,
         },
         timeout=60,
@@ -209,32 +344,18 @@ def summarize_with_glm(papers: list[dict], theme_text: str) -> str:
 
 
 def interactive_mode(client: httpx.Client, papers: list[dict], theme_id: str):
-    """Interactive mode: chat about papers, fetch full text on demand."""
+    """Interactive mode: chat about papers and manage explicit full-text acquire."""
     api_key = get_bigmodel_api_key()
 
     print("\n" + "=" * 60)
-    print(
-        "Interactive Mode \u2014 ask about papers, type 'fulltext N' for paper N details"
-    )
+    print("Interactive Mode - ask about papers, 'fulltext N' reads cache, 'acquire N' fetches")
     print("Type 'quit' to exit")
     print("=" * 60)
-
-    paper_context = "\n".join(
-        f"[{i}] {p['title']} "
-        f"({p.get('year', '?')}, {p.get('venue', '?')}, "
-        f"score={p.get('composite_score', 0):.3f})"
-        for i, p in enumerate(papers[:50])
-    )
 
     messages = [
         {
             "role": "system",
-            "content": (
-                f"You are a research assistant. Here are {len(papers)} papers:\n"
-                f"{paper_context}\n\n"
-                f"Answer questions about these papers. If you need full text, "
-                f"say [FETCH_FULLTEXT N] where N is the paper number."
-            ),
+            "content": build_interactive_system_prompt(papers),
         }
     ]
 
@@ -264,7 +385,25 @@ def interactive_mode(client: httpx.Client, papers: list[dict], theme_id: str):
                 print("Usage: fulltext N")
             continue
 
+        if user_input.lower().startswith("acquire "):
+            try:
+                idx = int(user_input.split()[1])
+                if 0 <= idx < len(papers):
+                    ft = ensure_paper_fulltext(client, papers[idx])
+                    print(
+                        f"\n--- Full text status: {ft.get('access_status', 'unknown')} ---"
+                    )
+                    for sec in ft.get("sections", []):
+                        print(f"\n## {sec.get('section_title', 'Section')}")
+                        print(sec.get("text_content", "")[:500])
+                else:
+                    print(f"Index out of range (0-{len(papers)-1})")
+            except (ValueError, IndexError):
+                print("Usage: acquire N")
+            continue
+
         messages.append({"role": "user", "content": user_input})
+        messages = prepare_chat_messages(messages)
 
         try:
             resp = httpx.post(
@@ -359,11 +498,14 @@ def main():
 
         # Concurrent full-text fetching (max 20 papers, 5 concurrent)
         print(f"\n{'=' * 60}")
-        print(f"FETCHING FULL TEXTS (up to {MAX_FULLTEXT_READS}, {CONCURRENT_REQUESTS} concurrent)")
+        print(
+            f"CHECKING CACHE AND ACQUIRING FULL TEXTS "
+            f"(up to {MAX_FULLTEXT_READS}, {CONCURRENT_REQUESTS} concurrent)"
+        )
         print(f"{'=' * 60}")
-        fulltexts = fetch_fulltexts_concurrent(client, papers)
+        fulltexts = ensure_fulltexts_concurrent(client, papers)
         available = sum(1 for ft in fulltexts if ft.get("fulltext_available"))
-        print(f"  Retrieved {len(fulltexts)} full texts ({available} available)")
+        print(f"  Checked {len(fulltexts)} papers ({available} cached full texts available)")
 
         # GLM summary
         if not args.no_glm:

@@ -11,6 +11,7 @@ from scholartrace.api.payloads import deepxiv_summary_payload
 from scholartrace.config import Settings
 from scholartrace.deepxiv.agent import DeepXivAgent
 from scholartrace.deepxiv.token_pool import TokenPool
+from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET
 from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
@@ -114,6 +115,66 @@ async def test_agent_failure_does_not_select_everything(monkeypatch: pytest.Monk
     await agent.close()
 
     assert filtered == []
+
+
+@pytest.mark.asyncio
+async def test_agent_batches_large_requests_under_prompt_budget(monkeypatch: pytest.MonkeyPatch):
+    agent = DeepXivAgent(api_key="test-key")
+    recorded_token_estimates: list[int] = []
+    recorded_prompt_texts: list[str] = []
+
+    async def _fake_post(url, headers=None, json=None):
+        messages = json["messages"]
+        recorded_token_estimates.append(
+            DEFAULT_PROMPT_BUDGET.estimate_messages(messages)
+        )
+        user_content = messages[-1]["content"]
+        recorded_prompt_texts.append(user_content)
+        batch_count = user_content.count("\nAbstract:")
+        response_body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": str(
+                            [
+                                {
+                                    "index": idx,
+                                    "selected": False,
+                                    "relevance": 0,
+                                    "novelty": 0,
+                                    "quality": 0,
+                                    "reason": "not selected",
+                                }
+                                for idx in range(batch_count)
+                            ]
+                        ).replace("'", '"')
+                    }
+                }
+            ]
+        }
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json=response_body)
+
+    monkeypatch.setattr(agent._client, "post", _fake_post)
+
+    papers = [
+        {
+            "title": f"Paper {idx}",
+            "abstract": "A" * 8000,
+        }
+        for idx in range(80)
+    ]
+    filtered = await agent.filter_papers(papers, "How does this scale?")
+    await agent.close()
+
+    assert filtered == []
+    assert len(recorded_token_estimates) > 1
+    assert all(
+        estimate <= DEFAULT_PROMPT_BUDGET.max_input_tokens
+        for estimate in recorded_token_estimates
+    )
+    assert any("Paper 0" in prompt for prompt in recorded_prompt_texts)
+    assert any("Paper 79" in prompt for prompt in recorded_prompt_texts)
 
 
 def test_rest_and_mcp_wrappers_share_configured_deepxiv_settings(monkeypatch: pytest.MonkeyPatch):

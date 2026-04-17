@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET, PromptBudget
+
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """You are a research assistant that filters academic papers for relevance.
@@ -58,11 +60,13 @@ class DeepXivAgent:
         base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
         model: str = "glm-5-turbo",
         max_fulltext: int = 20,
+        prompt_budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
         self._max_fulltext = max_fulltext
+        self._prompt_budget = prompt_budget
         self._client = httpx.AsyncClient(timeout=120.0)
 
     async def close(self) -> None:
@@ -126,17 +130,54 @@ class DeepXivAgent:
         question: str,
     ) -> list[dict[str, Any]]:
         """Call GLM to filter papers. Returns list of filter result dicts."""
-        # Build paper list for the prompt
-        paper_lines = []
-        for i, p in enumerate(papers):
-            title = p.get("title", "Unknown")
-            abstract = (p.get("abstract") or "")[:500]
-            paper_lines.append(f"[{i}] {title}\nAbstract: {abstract}")
+        fixed_messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        question_text = self._prompt_budget.truncate_text(question, 2_000)
 
-        user_msg = (
-            f"Research Question: {question}\n\n"
-            f"Papers:\n{chr(10).join(paper_lines)}"
+        paper_snippets = [
+            self._paper_snippet(paper)
+            for paper in papers
+        ]
+        batches = self._prompt_budget.pack_items(
+            paper_snippets,
+            fixed_messages=fixed_messages,
+            prefix=f"Research Question: {question_text}\n\nPapers:\n",
         )
+
+        merged_results = self._default_filter(len(papers))
+        start = 0
+        for batch_snippets in batches:
+            batch_size = len(batch_snippets)
+            batch_papers = papers[start:start + batch_size]
+            batch_results = await self._call_llm_filter_batch(batch_papers, question_text)
+            for result in batch_results:
+                local_index = result.get("index")
+                if not isinstance(local_index, int):
+                    continue
+                global_index = start + local_index
+                if 0 <= global_index < len(merged_results):
+                    merged_results[global_index] = {
+                        **result,
+                        "index": global_index,
+                    }
+            start += batch_size
+
+        return merged_results
+
+    def _paper_snippet(self, paper: dict[str, Any]) -> str:
+        title = paper.get("title", "Unknown")
+        abstract = self._prompt_budget.truncate_text(paper.get("abstract") or "", 1_500)
+        return f"{title}\nAbstract: {abstract}"
+
+    async def _call_llm_filter_batch(
+        self,
+        papers: list[dict[str, Any]],
+        question: str,
+    ) -> list[dict[str, Any]]:
+        paper_lines = [
+            f"[{i}] {self._paper_snippet(paper)}"
+            for i, paper in enumerate(papers)
+        ]
+        user_msg = f"Research Question: {question}\n\nPapers:\n{chr(10).join(paper_lines)}"
 
         try:
             resp = await self._client.post(

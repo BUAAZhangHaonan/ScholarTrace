@@ -259,6 +259,125 @@ class TestOaUrlPath:
         artifacts = storage.get_artifacts_by_work(work.id)
         assert any(a.kind == ArtifactKind.PDF for a in artifacts)
 
+    @pytest.mark.asyncio
+    async def test_oa_url_succeeds_before_deepxiv_fallback(self, storage, settings):
+        settings.deepxiv_tokens = "configured-token"
+        arxiv_id = "2401.11111"
+        html_url = f"https://arxiv.org/html/{arxiv_id}"
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+        oa_url = "https://publisher.org/open-access.html"
+        work = Work(title="OA Before DeepXiv", arxiv_id=arxiv_id, oa_url=oa_url)
+        storage.save_work(work)
+
+        fake = _FakeClient(
+            responses={oa_url: SAMPLE_HTML},
+            errors={html_url, pdf_url},
+        )
+
+        class _ForbiddenDeepXivConnector:
+            async def get_fulltext(self, requested_arxiv_id: str) -> str | None:
+                raise AssertionError("DeepXiv fallback should not run when oa_url succeeds")
+
+            async def close(self) -> None:
+                return None
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            with patch(
+                "scholartrace.services.fulltext.DeepXivConnector",
+                return_value=_ForbiddenDeepXivConnector(),
+            ):
+                result = await acquire_fulltext(work, storage, settings)
+
+        assert result.fulltext_available is True
+        payload = read_cached_fulltext(result, storage, settings)
+        assert any(a["source_url"] == oa_url for a in payload["artifacts"])
+        assert any(a["kind"] == "html" for a in payload["artifacts"])
+        assert not any(a["kind"] == "markdown" for a in payload["artifacts"])
+
+
+class TestDeepXivFallback:
+    @pytest.mark.asyncio
+    async def test_explicit_acquire_uses_deepxiv_markdown_after_public_misses(
+        self, storage, settings
+    ):
+        settings.deepxiv_tokens = "configured-token"
+        arxiv_id = "2401.12345"
+        html_url = f"https://arxiv.org/html/{arxiv_id}"
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+        work = Work(title="DeepXiv Fallback Paper", arxiv_id=arxiv_id)
+        storage.save_work(work)
+
+        fake = _FakeClient(errors={html_url, pdf_url})
+
+        class _FakeDeepXivConnector:
+            def __init__(self, settings=None):
+                self.calls: list[str] = []
+
+            async def get_fulltext(self, requested_arxiv_id: str) -> str | None:
+                self.calls.append(requested_arxiv_id)
+                return (
+                    "# Introduction\n\nDeepXiv introduction.\n\n"
+                    "## Method\n\nDeepXiv method details."
+                )
+
+            async def close(self) -> None:
+                return None
+
+        connector = _FakeDeepXivConnector()
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            with patch(
+                "scholartrace.services.fulltext.DeepXivConnector",
+                return_value=connector,
+            ):
+                result = await acquire_fulltext(work, storage, settings)
+
+        assert result.fulltext_available is True
+        assert result.access_status == AccessStatus.AVAILABLE
+        assert connector.calls == [arxiv_id]
+
+        payload = read_cached_fulltext(result, storage, settings)
+        assert payload["fulltext_available"] is True
+        assert payload["acquisition_state"] == AcquisitionState.AVAILABLE.value
+        assert payload["needs_acquisition"] is False
+        assert any(a["kind"] == "markdown" for a in payload["artifacts"])
+        assert [section["section_title"] for section in payload["sections"]] == [
+            "Introduction",
+            "Method",
+        ]
+        assert "DeepXiv method details." in (payload["parsed_text"] or "")
+
+    @pytest.mark.asyncio
+    async def test_deepxiv_fallback_is_not_used_when_public_html_succeeds(
+        self, storage, settings
+    ):
+        settings.deepxiv_tokens = "configured-token"
+        arxiv_id = "2401.54321"
+        html_url = f"https://arxiv.org/html/{arxiv_id}"
+        work = Work(title="Public HTML First", arxiv_id=arxiv_id)
+        storage.save_work(work)
+
+        fake = _FakeClient(responses={html_url: SAMPLE_HTML})
+
+        class _ForbiddenDeepXivConnector:
+            async def get_fulltext(self, requested_arxiv_id: str) -> str | None:
+                raise AssertionError("DeepXiv fallback should not run when HTML succeeds")
+
+            async def close(self) -> None:
+                return None
+
+        with patch("scholartrace.services.fulltext.httpx.AsyncClient", return_value=fake):
+            with patch(
+                "scholartrace.services.fulltext.DeepXivConnector",
+                return_value=_ForbiddenDeepXivConnector(),
+            ):
+                result = await acquire_fulltext(work, storage, settings)
+
+        assert result.fulltext_available is True
+        payload = read_cached_fulltext(result, storage, settings)
+        assert any(a["kind"] == "html" for a in payload["artifacts"])
+        assert not any(a["kind"] == "markdown" for a in payload["artifacts"])
+
 
 class TestAbstractOnlyFallback:
     """Cascade step 4: nothing works -> abstract_only."""

@@ -20,6 +20,7 @@ class SourceName(str, Enum):
 class ArtifactKind(str, Enum):
     PDF = "pdf"
     HTML = "html"
+    MARKDOWN = "markdown"
     SOURCE_TAR = "source_tar"
     PARSED_TEXT = "parsed_text"
 

@@ -18,6 +18,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from scholartrace.config import Settings
+from scholartrace.connectors.deepxiv_connector import DeepXivConnector
 from scholartrace.models.schemas import (
     AccessStatus,
     AcquisitionState,
@@ -170,6 +171,47 @@ def _parse_html_sections(html: str) -> list[tuple[str, str]]:
     return sections
 
 
+def _parse_markdown_sections(markdown: str) -> list[tuple[str, str]]:
+    """Parse markdown headings into ``(title, content)`` pairs."""
+    sections: list[tuple[str, str]] = []
+    preamble: list[str] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    def _flush_current() -> None:
+        nonlocal current_title, current_lines
+        if current_title is None:
+            return
+        sections.append((current_title, "\n".join(current_lines).strip()))
+        current_title = None
+        current_lines = []
+
+    for raw_line in markdown.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("#"):
+            _flush_current()
+            current_title = line.lstrip("#").strip() or "Section"
+            current_lines = []
+            continue
+        if current_title is None:
+            if line.strip():
+                preamble.append(line)
+            continue
+        current_lines.append(line)
+
+    if preamble:
+        sections.append(("Preamble", "\n".join(preamble).strip()))
+    _flush_current()
+
+    if sections:
+        return sections
+
+    full_text = markdown.strip()
+    if full_text:
+        return [("Full Text", full_text)]
+    return []
+
+
 def _save_artifact(
     work_id: str,
     kind: ArtifactKind,
@@ -180,7 +222,12 @@ def _save_artifact(
     *,
     conn,
 ) -> Artifact:
-    ext = "html" if kind == ArtifactKind.HTML else "txt" if kind == ArtifactKind.PARSED_TEXT else "pdf"
+    if kind == ArtifactKind.HTML:
+        ext = "html"
+    elif kind in {ArtifactKind.PARSED_TEXT, ArtifactKind.MARKDOWN}:
+        ext = "txt"
+    else:
+        ext = "pdf"
     raw_dir = settings.data_dir / "artifacts" / "raw"
     parsed_dir = settings.data_dir / "artifacts" / "parsed"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +392,17 @@ def _persist_available_text(
         return saved_work
 
 
+def _has_usable_deepxiv_tokens(settings: Settings) -> bool:
+    return any(token.strip() for token in settings.deepxiv_tokens.split(","))
+
+
+def _deepxiv_acquisition_enabled(settings: Settings) -> bool:
+    return _has_usable_deepxiv_tokens(settings) or (
+        settings.deepxiv_auto_register
+        and bool(settings.deepxiv_register_sdk_secret.strip())
+    )
+
+
 def _load_parsed_text(work_id: str, storage: StorageService) -> str | None:
     artifacts = storage.get_artifacts_by_work(work_id)
     for artifact in artifacts:
@@ -462,6 +520,85 @@ async def _attempt_pdf_acquisition(
     )
 
 
+async def _attempt_metadata_url_acquisition(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+    client: httpx.AsyncClient,
+    url: str,
+) -> Work | None:
+    response, safe_url = await _download_response(url, client)
+    content = response.content
+    content_type = ((getattr(response, "headers", {}) or {}).get("content-type") or "").lower()
+
+    if (
+        "pdf" in content_type
+        or safe_url.lower().endswith(".pdf")
+        or content.startswith(b"%PDF")
+    ):
+        text = _extract_pdf_text(content)
+        if not text.strip():
+            return None
+        return _persist_available_text(
+            work,
+            storage,
+            settings,
+            kind=ArtifactKind.PDF,
+            content=content,
+            source_url=safe_url,
+            parsed_text=text,
+        )
+
+    html = response.text
+    sections = _parse_html_sections(html)
+    if not sections:
+        return None
+    full_text = "\n\n".join(content for _, content in sections)
+    return _persist_available_text(
+        work,
+        storage,
+        settings,
+        kind=ArtifactKind.HTML,
+        content=html,
+        source_url=safe_url,
+        sections=sections,
+        parsed_text=full_text,
+    )
+
+
+async def _attempt_deepxiv_markdown_acquisition(
+    work: Work,
+    storage: StorageService,
+    settings: Settings,
+) -> Work | None:
+    if not work.arxiv_id or not _deepxiv_acquisition_enabled(settings):
+        return None
+
+    connector = DeepXivConnector(settings=settings)
+    try:
+        markdown = await connector.get_fulltext(work.arxiv_id)
+    finally:
+        await connector.close()
+
+    if not markdown or not markdown.strip():
+        return None
+
+    sections = _parse_markdown_sections(markdown)
+    parsed_text = "\n\n".join(
+        content for _, content in sections if content.strip()
+    ).strip() or markdown.strip()
+    return _persist_available_text(
+        work,
+        storage,
+        settings,
+        kind=ArtifactKind.MARKDOWN,
+        content=markdown,
+        source_url=f"https://data.rag.ac.cn/api/arxiv/{work.arxiv_id}/raw",
+        sections=sections,
+        parsed_text=parsed_text,
+    )
+
+
 async def _acquire_fulltext_inner(
     work: Work,
     storage: StorageService,
@@ -547,7 +684,7 @@ async def _acquire_fulltext_inner(
 
                 if current.pdf_url:
                     try:
-                        result = await _attempt_pdf_acquisition(
+                        result = await _attempt_metadata_url_acquisition(
                             current,
                             storage,
                             settings,
@@ -565,6 +702,49 @@ async def _acquire_fulltext_inner(
                         )
                     except Exception:
                         logger.debug("Metadata PDF acquisition failed for %s", current.id, exc_info=True)
+
+                for metadata_url in (current.oa_url, current.html_url):
+                    if not metadata_url or metadata_url == current.pdf_url:
+                        continue
+                    try:
+                        result = await _attempt_metadata_url_acquisition(
+                            current,
+                            storage,
+                            settings,
+                            client,
+                            metadata_url,
+                        )
+                        if result is not None:
+                            return result
+                    except FullTextFetchRejected as exc:
+                        logger.warning(
+                            "Blocked unsafe full-text fetch for %s via %s: %s",
+                            current.id,
+                            _redact_url(metadata_url),
+                            exc,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Metadata URL acquisition failed for %s",
+                            current.id,
+                            exc_info=True,
+                        )
+
+                if current.arxiv_id:
+                    try:
+                        result = await _attempt_deepxiv_markdown_acquisition(
+                            current,
+                            storage,
+                            settings,
+                        )
+                        if result is not None:
+                            return result
+                    except Exception:
+                        logger.debug(
+                            "DeepXiv markdown acquisition failed for %s",
+                            current.id,
+                            exc_info=True,
+                        )
         except Exception:
             logger.warning("Full-text acquisition failed for %s", current.id, exc_info=True)
 
