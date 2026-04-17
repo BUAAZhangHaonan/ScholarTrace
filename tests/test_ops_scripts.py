@@ -166,6 +166,19 @@ def test_run_normalizes_legacy_bigmodel_env_names(tmp_path: Path) -> None:
     assert tmux_state.read_text(encoding="utf-8").strip() == SESSION_NAME
 
 
+def test_run_does_not_export_empty_legacy_model_override(tmp_path: Path) -> None:
+    fake_root, env, tmux_log, _ = _prepare_fake_workspace(
+        tmp_path,
+        env_text="BIGMODEL_API_KEY=legacy-key\n",
+    )
+
+    result = _run_script(fake_root / RUN_SCRIPT.name, fake_root, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    tmux_log_text = tmux_log.read_text(encoding="utf-8")
+    assert "SCHOLARTRACE_BIGMODEL_MODEL" not in tmux_log_text
+
+
 def test_run_fails_cleanly_when_bigmodel_key_is_missing(tmp_path: Path) -> None:
     fake_root, env, _, _ = _prepare_fake_workspace(tmp_path)
 

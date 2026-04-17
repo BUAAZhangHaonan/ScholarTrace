@@ -5,6 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCHOLARTRACE_ENV_FILE:-${ROOT_DIR}/.env}"
 readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-172.17.194.210}"
 
+normalize_legacy_env() {
+  local target_name="$1"
+  local legacy_name="$2"
+  local target_value="${!target_name:-}"
+  local legacy_value="${!legacy_name:-}"
+
+  if [[ -z "${target_value}" && -n "${legacy_value}" ]]; then
+    export "${target_name}=${legacy_value}"
+  fi
+}
+
 load_repo_env() {
   if [[ -f "${ENV_FILE}" ]]; then
     echo "Loaded repo .env from ${ENV_FILE}"
@@ -17,9 +28,9 @@ load_repo_env() {
   fi
 
   # Normalize legacy BigModel variable names from existing .env files.
-  export SCHOLARTRACE_BIGMODEL_API_KEY="${SCHOLARTRACE_BIGMODEL_API_KEY:-${BIGMODEL_API_KEY:-}}"
-  export SCHOLARTRACE_BIGMODEL_BASE_URL="${SCHOLARTRACE_BIGMODEL_BASE_URL:-${BIGMODEL_BASE_URL:-}}"
-  export SCHOLARTRACE_BIGMODEL_MODEL="${SCHOLARTRACE_BIGMODEL_MODEL:-${BIGMODEL_MODEL:-}}"
+  normalize_legacy_env SCHOLARTRACE_BIGMODEL_API_KEY BIGMODEL_API_KEY
+  normalize_legacy_env SCHOLARTRACE_BIGMODEL_BASE_URL BIGMODEL_BASE_URL
+  normalize_legacy_env SCHOLARTRACE_BIGMODEL_MODEL BIGMODEL_MODEL
 
   export SCHOLARTRACE_MCP_TRANSPORT="${SCHOLARTRACE_MCP_TRANSPORT:-sse}"
   export SCHOLARTRACE_MCP_HOST="${SCHOLARTRACE_MCP_HOST:-0.0.0.0}"
