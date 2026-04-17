@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_lib
 import os
 import tempfile
 
@@ -9,7 +10,7 @@ import pytest
 
 from scholartrace.api.payloads import deepxiv_summary_payload
 from scholartrace.config import Settings
-from scholartrace.deepxiv.agent import DeepXivAgent
+from scholartrace.deepxiv.agent import DeepXivAgent, DeepXivAgentError
 from scholartrace.deepxiv.token_pool import TokenPool
 from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET
 from scholartrace.services import runtime_limits
@@ -176,6 +177,134 @@ async def test_agent_batches_large_requests_under_prompt_budget(monkeypatch: pyt
     assert any("Paper 0" in prompt for prompt in recorded_prompt_texts)
     assert any("Paper 79" in prompt for prompt in recorded_prompt_texts)
 
+
+@pytest.mark.asyncio
+async def test_agent_caps_batch_size_and_sets_glm_request_options(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = DeepXivAgent(api_key="test-key")
+    recorded_batch_counts: list[int] = []
+    recorded_max_tokens: list[int] = []
+    recorded_thinking_modes: list[str] = []
+
+    async def _fake_post(url, headers=None, json=None):
+        user_content = json["messages"][-1]["content"]
+        batch_count = user_content.count("\nAbstract:")
+        recorded_batch_counts.append(batch_count)
+        recorded_max_tokens.append(json["max_tokens"])
+        recorded_thinking_modes.append(json["thinking"]["type"])
+        response_body = {
+            "choices": [
+                    {
+                        "message": {
+                            "content": json_lib.dumps(
+                                [
+                                    {
+                                        "index": idx,
+                                        "selected": idx == 0,
+                                    "relevance": 8,
+                                    "novelty": 7,
+                                    "quality": 7,
+                                    "reason": "kept",
+                                }
+                                for idx in range(batch_count)
+                                ]
+                            )
+                        }
+                    }
+                ]
+            }
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json=response_body)
+
+    monkeypatch.setattr(agent._client, "post", _fake_post)
+
+    papers = [
+        {"title": f"Paper {idx}", "abstract": "A" * 1200}
+        for idx in range(23)
+    ]
+    reranked = await agent.rerank_papers(papers, "How should we batch these?")
+    await agent.close()
+
+    assert len(reranked) == 23
+    assert recorded_batch_counts == [10, 10, 3]
+    assert recorded_max_tokens == [128_000, 128_000, 128_000]
+    assert recorded_thinking_modes == ["enabled", "enabled", "enabled"]
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_with_smaller_batches_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = DeepXivAgent(api_key="test-key")
+    recorded_batch_counts: list[int] = []
+
+    async def _fake_post(url, headers=None, json=None):
+        user_content = json["messages"][-1]["content"]
+        batch_count = user_content.count("\nAbstract:")
+        recorded_batch_counts.append(batch_count)
+        if batch_count >= 10:
+            raise httpx.ReadTimeout("timed out", request=httpx.Request("POST", url))
+        response_body = {
+            "choices": [
+                    {
+                        "message": {
+                            "content": json_lib.dumps(
+                                [
+                                    {
+                                        "index": idx,
+                                        "selected": True,
+                                    "relevance": 8,
+                                    "novelty": 7,
+                                    "quality": 7,
+                                    "reason": "kept",
+                                }
+                                for idx in range(batch_count)
+                                ]
+                            )
+                        }
+                    }
+                ]
+            }
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, request=request, json=response_body)
+
+    monkeypatch.setattr(agent._client, "post", _fake_post)
+
+    papers = [
+        {"title": f"Paper {idx}", "abstract": "A" * 1200}
+        for idx in range(12)
+    ]
+    reranked = await agent.rerank_papers(papers, "How should we retry this?")
+    await agent.close()
+
+    assert len(reranked) == 12
+    assert recorded_batch_counts == [10, 5, 5, 2]
+
+
+@pytest.mark.asyncio
+async def test_agent_includes_business_error_code_in_glm_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = DeepXivAgent(api_key="test-key")
+
+    async def _failing_post(url, headers=None, json=None):
+        request = httpx.Request("POST", url)
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"error": {"code": "1261", "message": "Prompt 超长"}},
+        )
+        raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+    monkeypatch.setattr(agent._client, "post", _failing_post)
+
+    with pytest.raises(DeepXivAgentError, match="1261"):
+        await agent.rerank_papers(
+            [{"title": "Paper A", "abstract": "A"}],
+            "test question",
+        )
+    await agent.close()
 
 def test_rest_and_mcp_wrappers_share_configured_deepxiv_settings(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdir:
