@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from scholartrace.config import Settings
 from scholartrace.models.schemas import (
     JobStatus,
     RawCandidate,
@@ -169,6 +170,131 @@ class TestJobLifecycle:
 class TestRetrievalPipeline:
     """Full pipeline tests using mocked connectors."""
 
+    def test_build_connectors_includes_deepxiv_when_tokens_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import scholartrace.services.retrieval as retrieval_mod
+
+        def _factory(name: str):
+            return lambda settings=None: type("Connector", (), {"source_name": name})()
+
+        monkeypatch.setattr(retrieval_mod, "OpenAlexConnector", _factory("openalex"))
+        monkeypatch.setattr(retrieval_mod, "ArxivConnector", _factory("arxiv"))
+        monkeypatch.setattr(
+            retrieval_mod, "SemanticScholarConnector", _factory("semantic_scholar")
+        )
+        monkeypatch.setattr(retrieval_mod, "DblpConnector", _factory("dblp"))
+        monkeypatch.setattr(retrieval_mod, "OpenReviewConnector", _factory("openreview"))
+        monkeypatch.setattr(retrieval_mod, "CrossrefConnector", _factory("crossref"))
+        monkeypatch.setattr(retrieval_mod, "DeepXivConnector", _factory("deepxiv"))
+
+        connectors = retrieval_mod._build_connectors(Settings(deepxiv_tokens="token-a"))
+
+        assert [connector.source_name for connector in connectors] == [
+            "openalex",
+            "arxiv",
+            "semantic_scholar",
+            "dblp",
+            "openreview",
+            "crossref",
+            "deepxiv",
+        ]
+
+    def test_build_connectors_includes_deepxiv_when_auto_register_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import scholartrace.services.retrieval as retrieval_mod
+
+        def _factory(name: str):
+            return lambda settings=None: type("Connector", (), {"source_name": name})()
+
+        monkeypatch.setattr(retrieval_mod, "OpenAlexConnector", _factory("openalex"))
+        monkeypatch.setattr(retrieval_mod, "ArxivConnector", _factory("arxiv"))
+        monkeypatch.setattr(
+            retrieval_mod, "SemanticScholarConnector", _factory("semantic_scholar")
+        )
+        monkeypatch.setattr(retrieval_mod, "DblpConnector", _factory("dblp"))
+        monkeypatch.setattr(retrieval_mod, "OpenReviewConnector", _factory("openreview"))
+        monkeypatch.setattr(retrieval_mod, "CrossrefConnector", _factory("crossref"))
+        monkeypatch.setattr(retrieval_mod, "DeepXivConnector", _factory("deepxiv"))
+
+        connectors = retrieval_mod._build_connectors(
+            Settings(
+                deepxiv_auto_register=True,
+                deepxiv_register_sdk_secret="sdk-secret",
+            )
+        )
+
+        assert connectors[-1].source_name == "deepxiv"
+
+    def test_build_connectors_omits_deepxiv_when_not_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import scholartrace.services.retrieval as retrieval_mod
+
+        def _factory(name: str):
+            return lambda settings=None: type("Connector", (), {"source_name": name})()
+
+        monkeypatch.setattr(retrieval_mod, "OpenAlexConnector", _factory("openalex"))
+        monkeypatch.setattr(retrieval_mod, "ArxivConnector", _factory("arxiv"))
+        monkeypatch.setattr(
+            retrieval_mod, "SemanticScholarConnector", _factory("semantic_scholar")
+        )
+        monkeypatch.setattr(retrieval_mod, "DblpConnector", _factory("dblp"))
+        monkeypatch.setattr(retrieval_mod, "OpenReviewConnector", _factory("openreview"))
+        monkeypatch.setattr(retrieval_mod, "CrossrefConnector", _factory("crossref"))
+        monkeypatch.setattr(retrieval_mod, "DeepXivConnector", _factory("deepxiv"))
+
+        with caplog.at_level("INFO"):
+            connectors = retrieval_mod._build_connectors(Settings())
+
+        assert [connector.source_name for connector in connectors] == [
+            "openalex",
+            "arxiv",
+            "semantic_scholar",
+            "dblp",
+            "openreview",
+            "crossref",
+        ]
+        assert "DeepXiv is not configured for unified retrieval" in caplog.text
+
+    def test_build_connectors_omits_deepxiv_for_delimiter_only_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import scholartrace.services.retrieval as retrieval_mod
+
+        def _factory(name: str):
+            return lambda settings=None: type("Connector", (), {"source_name": name})()
+
+        monkeypatch.setattr(retrieval_mod, "OpenAlexConnector", _factory("openalex"))
+        monkeypatch.setattr(retrieval_mod, "ArxivConnector", _factory("arxiv"))
+        monkeypatch.setattr(
+            retrieval_mod, "SemanticScholarConnector", _factory("semantic_scholar")
+        )
+        monkeypatch.setattr(retrieval_mod, "DblpConnector", _factory("dblp"))
+        monkeypatch.setattr(retrieval_mod, "OpenReviewConnector", _factory("openreview"))
+        monkeypatch.setattr(retrieval_mod, "CrossrefConnector", _factory("crossref"))
+        monkeypatch.setattr(retrieval_mod, "DeepXivConnector", _factory("deepxiv"))
+
+        with caplog.at_level("INFO"):
+            connectors = retrieval_mod._build_connectors(Settings(deepxiv_tokens=" , "))
+
+        assert [connector.source_name for connector in connectors] == [
+            "openalex",
+            "arxiv",
+            "semantic_scholar",
+            "dblp",
+            "openreview",
+            "crossref",
+        ]
+        assert "DeepXiv is not configured for unified retrieval" in caplog.text
+
     def test_full_pipeline(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multiple queries, multiple sources -> dedup, ranking, storage."""
         storage = _tmp_storage(tmp_path)
@@ -286,6 +412,112 @@ class TestRetrievalPipeline:
         works = _run(run_retrieval(theme, storage))
         assert len(works) == 1
         assert works[0].source_provenance == ["openalex", "semantic_scholar"]
+
+    def test_dedup_across_openalex_and_deepxiv_preserves_provenance(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = _sample_theme()
+
+        oa_cands = [
+            _make_candidate(
+                "Unified RLHF Method",
+                doi="10.1/deepxiv",
+                openalex_id="W-deepxiv",
+                source=SourceName.OPENALEX,
+            ),
+        ]
+        deepxiv_cands = [
+            _make_candidate(
+                "Unified RLHF Method",
+                doi="10.1/deepxiv",
+                arxiv_id="2401.00001",
+                source=SourceName.DEEPXIV,
+            ),
+        ]
+
+        mock_connectors = [
+            _make_mock_connector("openalex", oa_cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+            _make_mock_connector("deepxiv", deepxiv_cands),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+
+        works = _run(run_retrieval(theme, storage))
+
+        assert len(works) == 1
+        assert works[0].source_provenance == ["openalex", "deepxiv"]
+
+    def test_retrieval_preserves_work_identity_and_provenance_across_deepxiv_reruns(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = _sample_theme()
+
+        openalex_only = [
+            _make_mock_connector(
+                "openalex",
+                [
+                    _make_candidate(
+                        "Stable Identity Paper",
+                        doi="10.1/stable",
+                        openalex_id="W-stable",
+                        source=SourceName.OPENALEX,
+                    )
+                ],
+            ),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+            _make_mock_connector("deepxiv", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: openalex_only)
+
+        first = _run(run_retrieval(theme, storage))
+        assert len(first) == 1
+
+        deepxiv_only = [
+            _make_mock_connector("openalex", []),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+            _make_mock_connector(
+                "deepxiv",
+                [
+                    _make_candidate(
+                        "Stable Identity Paper",
+                        doi="10.1/stable",
+                        arxiv_id="2401.00002",
+                        source=SourceName.DEEPXIV,
+                    )
+                ],
+            ),
+        ]
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: deepxiv_only)
+
+        second = _run(run_retrieval(theme, storage))
+
+        assert len(second) == 1
+        assert second[0].id == first[0].id
+        assert second[0].source_provenance == ["openalex", "deepxiv"]
 
     def test_ranking_produces_ordered_results(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """composite_score is strictly descending for papers with different scores."""
@@ -427,6 +659,43 @@ class TestRetrievalPipeline:
         ).fetchone()["c"]
         assert works_count == 0
         assert links_count == 0
+
+    def test_deepxiv_runtime_failure_does_not_break_unified_retrieval(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = _sample_theme()
+
+        mock_connectors = [
+            _make_mock_connector(
+                "openalex",
+                [
+                    _make_candidate(
+                        "OpenAlex Survives",
+                        doi="10.1/survive",
+                        openalex_id="W-survive",
+                        source=SourceName.OPENALEX,
+                    )
+                ],
+            ),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+            _make_failing_connector("deepxiv", RuntimeError("DeepXiv unavailable")),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+
+        works = _run(run_retrieval(theme, storage))
+
+        assert len(works) == 1
+        assert works[0].title == "OpenAlex Survives"
 
 
 class TestRetrievalForDocument:

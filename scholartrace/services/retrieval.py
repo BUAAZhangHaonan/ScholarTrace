@@ -9,6 +9,7 @@ from scholartrace.config import Settings, get_settings
 from scholartrace.connectors.arxiv import ArxivConnector
 from scholartrace.connectors.base import BaseConnector
 from scholartrace.connectors.crossref import CrossrefConnector
+from scholartrace.connectors.deepxiv_connector import DeepXivConnector
 from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openalex import OpenAlexConnector
 from scholartrace.connectors.openreview import OpenReviewConnector
@@ -19,6 +20,10 @@ from scholartrace.services.ranking import rank_papers
 from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
+
+
+def _has_usable_deepxiv_tokens(settings: Settings) -> bool:
+    return any(token.strip() for token in settings.deepxiv_tokens.split(","))
 
 
 def _candidate_to_work(candidate: RawCandidate) -> Work:
@@ -42,8 +47,8 @@ def _candidate_to_work(candidate: RawCandidate) -> Work:
 
 
 def _build_connectors(settings: Settings) -> list[BaseConnector]:
-    """Instantiate all six source connectors with the given settings."""
-    return [
+    """Instantiate the unified source connectors for retrieval."""
+    connectors: list[BaseConnector] = [
         OpenAlexConnector(settings=settings),
         ArxivConnector(settings=settings),
         SemanticScholarConnector(settings=settings),
@@ -51,6 +56,19 @@ def _build_connectors(settings: Settings) -> list[BaseConnector]:
         OpenReviewConnector(settings=settings),
         CrossrefConnector(settings=settings),
     ]
+
+    deepxiv_configured = _has_usable_deepxiv_tokens(settings) or (
+        settings.deepxiv_auto_register
+        and bool(settings.deepxiv_register_sdk_secret.strip())
+    )
+    if deepxiv_configured:
+        connectors.append(DeepXivConnector(settings=settings))
+    else:
+        logger.info(
+            "DeepXiv is not configured for unified retrieval; skipping DeepXiv connector"
+        )
+
+    return connectors
 
 
 async def _fan_out_query(
@@ -84,7 +102,8 @@ async def run_retrieval(
     """Execute the full retrieval pipeline for a Theme.
 
     Steps:
-    1. Fan out each parsed query across all 6 connectors concurrently.
+    1. Fan out each parsed query across the configured unified connectors concurrently.
+       DeepXiv joins this fan-out when its runtime is configured.
     2. Aggregate, deduplicate, convert to Work objects.
     3. Rank by composite score, persist to storage atomically, link to theme.
     4. Return the ranked list.
