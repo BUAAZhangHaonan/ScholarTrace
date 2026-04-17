@@ -14,7 +14,7 @@ RUN_SCRIPT = ROOT / "run_scholartrace_mcp_sse.sh"
 STOP_SCRIPT = ROOT / "stop_scholartrace_mcp_sse.sh"
 STATUS_SCRIPT = ROOT / "status_scholartrace_mcp_sse.sh"
 SESSION_NAME = "scholartrace_mcp_sse"
-LAN_URL = "http://10.134.132.166:8001/sse"
+LAN_URL = "http://172.17.194.210:8001/sse"
 AUTH_HEADER = "Authorization: Bearer g203-mcp"
 
 
@@ -144,11 +144,26 @@ def test_run_loads_repo_env_and_reports_it(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Loaded repo .env" in result.stdout
     assert "env-session" in result.stdout
-    assert "http://10.134.132.166:8123/sse" in result.stdout
+    assert "http://172.17.194.210:8123/sse" in result.stdout
     assert "Authorization: Bearer env-token" in result.stdout
     assert "tmux has-session -t env-session" in result.stdout
     assert "tmux attach -t env-session" in result.stdout
     assert tmux_log.read_text(encoding="utf-8")
+
+
+def test_run_normalizes_legacy_bigmodel_env_names(tmp_path: Path) -> None:
+    fake_root, env, _, tmux_state = _prepare_fake_workspace(
+        tmp_path,
+        env_text=(
+            "BIGMODEL_API_KEY=legacy-key\n"
+            "BIGMODEL_BASE_URL=https://example.invalid/glm\n"
+        ),
+    )
+
+    result = _run_script(fake_root / RUN_SCRIPT.name, fake_root, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tmux_state.read_text(encoding="utf-8").strip() == SESSION_NAME
 
 
 def test_run_fails_cleanly_when_bigmodel_key_is_missing(tmp_path: Path) -> None:
@@ -203,5 +218,5 @@ def test_status_reports_session_url_and_header(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "env-session" in result.stdout
-    assert "http://10.134.132.166:8123/sse" in result.stdout
+    assert "http://172.17.194.210:8123/sse" in result.stdout
     assert "Authorization: Bearer env-token" in result.stdout

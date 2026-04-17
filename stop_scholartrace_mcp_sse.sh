@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCHOLARTRACE_ENV_FILE:-${ROOT_DIR}/.env}"
-readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-10.134.132.166}"
+readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-172.17.194.210}"
 
 load_repo_env() {
   if [[ -f "${ENV_FILE}" ]]; then

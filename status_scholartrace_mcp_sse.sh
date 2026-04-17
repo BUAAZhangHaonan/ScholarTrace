@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCHOLARTRACE_ENV_FILE:-${ROOT_DIR}/.env}"
-readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-10.134.132.166}"
+readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-172.17.194.210}"
 
 load_repo_env() {
   if [[ -f "${ENV_FILE}" ]]; then
@@ -30,10 +30,22 @@ apply_runtime_defaults() {
 
 print_common() {
   local status_text="$1"
+  local chatbox_config
+  chatbox_config="$(cat <<JSON
+{"mcpServers":{"scholartrace":{"url":"${LAN_URL}","headers":{"Authorization":"Bearer ${SCHOLARTRACE_ACCESS_TOKEN}"}}}}
+JSON
+)"
+  local chatbox_encoded
+  chatbox_encoded="$(printf '%s' "${chatbox_config}" | base64 | tr -d '\n\r')"
+
   cat <<EOF
 tmux session: ${SESSION_NAME}
 LAN URL: ${LAN_URL}
 Authorization header: ${EXPECTED_AUTH_HEADER}
+ChatBox clipboard JSON:
+${chatbox_config}
+ChatBox one-click link:
+chatbox://mcp/install?server=${chatbox_encoded}
 status: ${status_text}
 Verification commands:
   ./status_scholartrace_mcp_sse.sh

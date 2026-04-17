@@ -22,6 +22,7 @@ REST stays broad for now. This pass simplifies the MCP product surface only.
 The repo-root tmux scripts are the main operational path:
 
 - They load the repo-root `.env` automatically when it exists.
+- They normalize legacy `BIGMODEL_API_KEY`, `BIGMODEL_BASE_URL`, and `BIGMODEL_MODEL` entries from older `.env` files into the runtime `SCHOLARTRACE_*` names.
 - They default to `SCHOLARTRACE_MCP_TRANSPORT=sse`, `SCHOLARTRACE_MCP_HOST=0.0.0.0`, `SCHOLARTRACE_MCP_PORT=8001`, `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true`, and `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`.
 - They fail clearly if `SCHOLARTRACE_BIGMODEL_API_KEY` is still missing after `.env` loading.
 - They fail clearly if `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER=true` but `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` is missing.
@@ -65,7 +66,7 @@ ss -ltnp | grep ':8001'
 
 Use this URL from a client on the same LAN:
 
-- `http://10.134.132.166:8001/sse`
+- `http://172.17.194.210:8001/sse`
 
 The token is user-defined. It is not auto-generated.
 
@@ -79,17 +80,25 @@ For a practical example, set `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`.
 
 ## ChatBox JSON
 
-Paste or import this in ChatBox:
+Paste or import this JSON in ChatBox:
 
 ```json
 {
-  "name": "ScholarTrace LAN",
-  "type": "sse",
-  "url": "http://10.134.132.166:8001/sse",
-  "headers": {
-    "Authorization": "Bearer g203-mcp"
+  "mcpServers": {
+    "scholartrace": {
+      "url": "http://172.17.194.210:8001/sse",
+      "headers": {
+        "Authorization": "Bearer g203-mcp"
+      }
+    }
   }
 }
+```
+
+If ChatBox still reports "No MCP server parsed", use this one-click format:
+
+```text
+chatbox://mcp/install?server=eyJtY3BTZXJ2ZXJzIjp7InNjaG9sYXJ0cmFjZSI6eyJ1cmwiOiJodHRwOi8vMTcyLjE3LjE5NC4yMTA6ODAwMS9zc2UiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIgZzIwMy1tY3AifX19fQ==
 ```
 
 ## DeepXiv Behavior

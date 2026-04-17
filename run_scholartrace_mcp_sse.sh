@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCHOLARTRACE_ENV_FILE:-${ROOT_DIR}/.env}"
-readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-10.134.132.166}"
+readonly LAN_IP="${SCHOLARTRACE_LAN_IP:-172.17.194.210}"
 
 load_repo_env() {
   if [[ -f "${ENV_FILE}" ]]; then
@@ -15,6 +15,11 @@ load_repo_env() {
   else
     echo "No repo .env found at ${ENV_FILE}"
   fi
+
+  # Normalize legacy BigModel variable names from existing .env files.
+  export SCHOLARTRACE_BIGMODEL_API_KEY="${SCHOLARTRACE_BIGMODEL_API_KEY:-${BIGMODEL_API_KEY:-}}"
+  export SCHOLARTRACE_BIGMODEL_BASE_URL="${SCHOLARTRACE_BIGMODEL_BASE_URL:-${BIGMODEL_BASE_URL:-}}"
+  export SCHOLARTRACE_BIGMODEL_MODEL="${SCHOLARTRACE_BIGMODEL_MODEL:-${BIGMODEL_MODEL:-}}"
 
   export SCHOLARTRACE_MCP_TRANSPORT="${SCHOLARTRACE_MCP_TRANSPORT:-sse}"
   export SCHOLARTRACE_MCP_HOST="${SCHOLARTRACE_MCP_HOST:-0.0.0.0}"
@@ -40,10 +45,22 @@ seed_tmux_environment() {
 }
 
 print_banner() {
+  local chatbox_config
+  chatbox_config="$(cat <<JSON
+{"mcpServers":{"scholartrace":{"url":"${LAN_URL}","headers":{"Authorization":"Bearer ${SCHOLARTRACE_ACCESS_TOKEN}"}}}}
+JSON
+)"
+  local chatbox_encoded
+  chatbox_encoded="$(printf '%s' "${chatbox_config}" | base64 | tr -d '\n\r')"
+
   cat <<EOF
 tmux session: ${SESSION_NAME}
 LAN URL: ${LAN_URL}
 Authorization header: ${EXPECTED_AUTH_HEADER}
+ChatBox clipboard JSON:
+${chatbox_config}
+ChatBox one-click link:
+chatbox://mcp/install?server=${chatbox_encoded}
 Verification commands:
   ./status_scholartrace_mcp_sse.sh
   tmux has-session -t ${SESSION_NAME}

@@ -38,11 +38,13 @@ def test_readmes_document_explicit_acquire_and_mcp_workflow():
         "./stop_scholartrace_mcp_sse.sh",
     ]
     exact_chatbox_json = """{
-  "name": "ScholarTrace LAN",
-  "type": "sse",
-  "url": "http://10.134.132.166:8001/sse",
-  "headers": {
-    "Authorization": "Bearer g203-mcp"
+  "mcpServers": {
+    "scholartrace": {
+      "url": "http://172.17.194.210:8001/sse",
+      "headers": {
+        "Authorization": "Bearer g203-mcp"
+      }
+    }
   }
 }"""
     shared_required_terms = [
@@ -51,7 +53,7 @@ def test_readmes_document_explicit_acquire_and_mcp_workflow():
         "glm-5-turbo",
         "SCHOLARTRACE_ACCESS_TOKEN=g203-mcp",
         "Authorization: Bearer g203-mcp",
-        "http://10.134.132.166:8001/sse",
+        "http://172.17.194.210:8001/sse",
         "run_scholartrace_mcp_sse",
         "status_scholartrace_mcp_sse",
         "stop_scholartrace_mcp_sse",
