@@ -1,12 +1,14 @@
 [Unit]
 Description=ScholarTrace MCP Server
 After=network.target
+# Secondary managed-deployment example; the main quick path is the tmux scripts in README.
 
 [Service]
 Type=simple
 User=scholartrace
 Group=scholartrace
 WorkingDirectory=/opt/ScholarTrace
+# Put SCHOLARTRACE_BIGMODEL_API_KEY and optional DeepXiv settings here.
 EnvironmentFile=/etc/scholartrace/scholartrace.env
 Environment=SCHOLARTRACE_MCP_TRANSPORT=sse
 Environment=SCHOLARTRACE_MCP_HOST=0.0.0.0

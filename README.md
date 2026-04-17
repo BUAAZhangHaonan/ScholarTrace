@@ -9,47 +9,73 @@
 ScholarTrace takes a theme document, retrieves papers from multiple scholarly sources, reranks them, and lets the MCP client read deeper only when needed.
 
 - **2 public MCP tools**: `query` and `read`
-- **Main deployment mode**: SSE over LAN for shared team use in ChatBox
+- **Main deployment mode**: LAN SSE for shared team use in ChatBox
+- **Local debug only**: `stdio`
 - **Default rerank model**: `glm-5-turbo`
 - **Default second-stage pool**: `agent_candidate_limit=100`
 - **Default final output**: `final_limit=20`
-- **Current local validation still collects 182 tests**
 
 REST stays broad for now. This pass simplifies the MCP product surface only.
 
 ## LAN SSE Quick Start
 
-This is the main deployment story.
+The repo-root tmux scripts are the main operational path:
+
+- They load the repo-root `.env` automatically when it exists.
+- They default to `SCHOLARTRACE_MCP_TRANSPORT=sse`, `SCHOLARTRACE_MCP_HOST=0.0.0.0`, `SCHOLARTRACE_MCP_PORT=8001`, `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true`, and `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`.
+- They fail clearly if `SCHOLARTRACE_BIGMODEL_API_KEY` is still missing after `.env` loading.
+- They fail clearly if `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER=true` but `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` is missing.
+- They do not fail if DeepXiv is otherwise absent. ScholarTrace still starts and prints that DeepXiv retrieval, direct evidence, and markdown fallback will be unavailable.
+
+Example `.env`:
 
 ```bash
-conda create -n ScholarTrace python=3.13 -y
-conda activate ScholarTrace
+SCHOLARTRACE_BIGMODEL_API_KEY=<your-bigmodel-key>
+SCHOLARTRACE_ACCESS_TOKEN=g203-mcp
 
-cd ScholarTrace
-python -m pip install -r requirements-dev.txt
+# Optional: the scripts already default these values for LAN SSE
+SCHOLARTRACE_MCP_TRANSPORT=sse
+SCHOLARTRACE_MCP_HOST=0.0.0.0
+SCHOLARTRACE_MCP_PORT=8001
+SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
 
-scholartrace-check-env --include-dev --pytest-collect
-pytest tests/ -q
+# Optional: DeepXiv tokens
+# SCHOLARTRACE_DEEPXIV_TOKENS=token-a,token-b
 
-export SCHOLARTRACE_MCP_TRANSPORT=sse
-export SCHOLARTRACE_MCP_HOST=0.0.0.0
-export SCHOLARTRACE_MCP_PORT=8001
-export SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
-export SCHOLARTRACE_ACCESS_TOKEN=g203-mcp
-export SCHOLARTRACE_BIGMODEL_API_KEY=<your-bigmodel-key>
+# Optional: DeepXiv auto-register
+# SCHOLARTRACE_DEEPXIV_AUTO_REGISTER=true
+# SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET=<real-sdk-secret-from-deepxiv>
+```
 
-scholartrace-mcp
+```bash
+./run_scholartrace_mcp_sse.sh
+./status_scholartrace_mcp_sse.sh
+./stop_scholartrace_mcp_sse.sh
+```
+
+The default tmux session name is `scholartrace_mcp_sse`.
+
+Useful checks:
+
+```bash
+tmux attach -t scholartrace_mcp_sse
+tmux capture-pane -pt scholartrace_mcp_sse
+ss -ltnp | grep ':8001'
 ```
 
 Use this URL from a client on the same LAN:
 
-- `http://<server-lan-ip>:8001/sse`
+- `http://10.134.132.166:8001/sse`
 
 The token is user-defined. It is not auto-generated.
 
 The MCP client must send:
 
 - `Authorization: Bearer g203-mcp`
+
+For a practical example, set `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`.
+
+`SCHOLARTRACE_BIGMODEL_API_KEY` comes from `.env` or environment variables. MCP clients do not pass that key in request payloads.
 
 ## ChatBox JSON
 
@@ -59,12 +85,37 @@ Paste or import this in ChatBox:
 {
   "name": "ScholarTrace LAN",
   "type": "sse",
-  "url": "http://<server-lan-ip>:8001/sse",
+  "url": "http://10.134.132.166:8001/sse",
   "headers": {
     "Authorization": "Bearer g203-mcp"
   }
 }
 ```
+
+## DeepXiv Behavior
+
+DeepXiv is optional.
+
+If DeepXiv is configured:
+
+- unified retrieval adds the DeepXiv source
+- `read` with `direct_evidence` can return DeepXiv metadata and brief for arXiv-backed papers
+- explicit full-text acquisition can use the DeepXiv markdown fallback after the public URL paths fail
+
+If DeepXiv is not configured:
+
+- ScholarTrace still runs
+- `query` still works
+- built-in `glm-5-turbo` rerank still works
+- DeepXiv retrieval contribution is skipped
+- `direct_evidence` may return `available=false`
+- DeepXiv markdown fallback in explicit full-text acquisition may be unavailable
+
+If you want `auto-register`:
+
+- ScholarTrace can auto-generate usernames and emails
+- `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` must already be available from the DeepXiv service side or a prior deployment config
+- the code cannot discover that SDK secret by itself
 
 ## Public MCP Surface
 
@@ -96,7 +147,7 @@ What `query` does by default:
 
 Important notes:
 
-- DeepXiv still joins unified retrieval as a source when it is configured
+- DeepXiv is optional. If DeepXiv is not configured, ScholarTrace still runs, `query` still works, built-in `glm-5-turbo` rerank still works, but DeepXiv retrieval contribution/direct evidence/markdown fallback may be unavailable.
 - The DeepXiv Agent is no longer a separate MCP step in the normal user flow
 - If `final_limit` is not given, `query` returns 20 papers by default
 - If the client asks for more, ScholarTrace returns that many when possible
@@ -174,14 +225,14 @@ Today the explicit acquire path really tries, in this order:
 2. arXiv PDF
 3. metadata `pdf_url`
 4. metadata `oa_url` or `html_url`
-5. DeepXiv markdown fallback for arXiv-backed papers when DeepXiv is configured
+5. DeepXiv markdown fallback when DeepXiv is configured
 
 What is confirmed working today:
 
 - arXiv HTML fetch with heading-based section parsing
 - arXiv PDF fetch with plain-text extraction
 - metadata PDF and HTML fetch
-- DeepXiv markdown fallback with heading-based section parsing
+- DeepXiv markdown fallback with heading-based section parsing when configured
 - explicit negative-cache states when acquisition fails
 
 What is still limited:
@@ -236,11 +287,14 @@ Key runtime settings:
 | `SCHOLARTRACE_MCP_PORT` | `8001` | MCP SSE port |
 | `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | `false` | Must be `true` for non-loopback SSE |
 | `SCHOLARTRACE_ACCESS_TOKEN` | | Shared bearer token for network MCP |
-| `SCHOLARTRACE_BIGMODEL_API_KEY` | | Required for the built-in query rerank |
+| `SCHOLARTRACE_BIGMODEL_API_KEY` | | Read from `.env` or environment variables; MCP clients do not pass this key in request payloads |
 | `SCHOLARTRACE_BIGMODEL_MODEL` | `glm-5-turbo` | Default rerank model |
 | `SCHOLARTRACE_AGENT_CANDIDATE_LIMIT` | `100` | Default second-stage candidate count |
 | `SCHOLARTRACE_FINAL_LIMIT` | `20` | Default final result count |
 | `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | `500` | Default coarse pool before rerank |
+| `SCHOLARTRACE_DEEPXIV_TOKENS` | | Optional DeepXiv tokens for retrieval, direct evidence, and markdown fallback |
+| `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER` | `false` | Optional DeepXiv auto-register switch |
+| `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` | | Required for DeepXiv auto-register; the code cannot discover it by itself |
 
 ## `stdio` Debug Mode
 
@@ -252,17 +306,24 @@ SCHOLARTRACE_MCP_TRANSPORT=stdio scholartrace-mcp
 
 Do not treat `stdio` as the main team deployment story. The main story is LAN SSE.
 
-## Example systemd Service
+## Managed systemd Example
 
-The repository includes `scripts/scholartrace-mcp.service` as an SSE-first example.
+The repository includes `scripts/scholartrace-mcp.service` as a secondary managed-deployment example.
 
-The key values are:
+Use the tmux scripts above for day-to-day startup and stop. Use systemd when you want a managed service.
+
+Keep the runtime secrets in the systemd `EnvironmentFile`:
+
+- `/etc/scholartrace/scholartrace.env`
+
+The key SSE values are:
 
 - `SCHOLARTRACE_MCP_TRANSPORT=sse`
 - `SCHOLARTRACE_MCP_HOST=0.0.0.0`
 - `SCHOLARTRACE_MCP_PORT=8001`
 - `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true`
 - `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`
+- `SCHOLARTRACE_BIGMODEL_API_KEY=<your-bigmodel-key>`
 
 ## Validation
 
