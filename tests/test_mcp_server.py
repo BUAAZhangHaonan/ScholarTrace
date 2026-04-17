@@ -355,6 +355,101 @@ async def test_read_direct_evidence_uses_deepxiv_for_arxiv_backed_papers(
 
 
 @pytest.mark.asyncio
+async def test_read_direct_evidence_returns_unavailable_for_non_arxiv_papers(
+    test_storage,
+):
+    from scholartrace.api.mcp_server import read
+
+    work = _make_work(arxiv_id=None)
+    test_storage.save_work(work)
+
+    result_str = await read(work.id, depth="direct_evidence")
+    data = json.loads(result_str)
+
+    assert data == {
+        "paper_id": work.id,
+        "depth": "direct_evidence",
+        "available": False,
+        "source": "deepxiv",
+        "reason": "Direct DeepXiv evidence is only available for arXiv-backed papers.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_direct_evidence_returns_unavailable_when_deepxiv_is_not_configured(
+    test_storage,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scholartrace.api import mcp_server
+
+    work = _make_work(arxiv_id="2401.00002")
+    test_storage.save_work(work)
+
+    class _FakeConnector:
+        async def get_paper_metadata(self, arxiv_id):
+            raise RuntimeError(
+                "DeepXiv is not configured. Set SCHOLARTRACE_DEEPXIV_TOKENS or enable auto-register."
+            )
+
+        async def get_paper_brief(self, arxiv_id):
+            raise AssertionError("brief should not be called after metadata failure")
+
+    mcp_server._deepxiv_connector = None
+    monkeypatch.setattr(
+        "scholartrace.connectors.deepxiv_connector.DeepXivConnector",
+        lambda settings=None: _FakeConnector(),
+    )
+
+    result_str = await mcp_server.read(work.id, depth="direct_evidence")
+    data = json.loads(result_str)
+
+    assert data == {
+        "paper_id": work.id,
+        "depth": "direct_evidence",
+        "available": False,
+        "source": "deepxiv",
+        "arxiv_id": "2401.00002",
+        "reason": "DeepXiv direct evidence is unavailable: DeepXiv is not configured. Set SCHOLARTRACE_DEEPXIV_TOKENS or enable auto-register.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_direct_evidence_returns_unavailable_when_deepxiv_runtime_call_fails(
+    test_storage,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scholartrace.api import mcp_server
+
+    work = _make_work(arxiv_id="2401.00003")
+    test_storage.save_work(work)
+
+    class _FakeConnector:
+        async def get_paper_metadata(self, arxiv_id):
+            return {"title": "Partial metadata", "arxiv_id": arxiv_id}
+
+        async def get_paper_brief(self, arxiv_id):
+            raise RuntimeError("DeepXiv request failed: upstream timeout")
+
+    mcp_server._deepxiv_connector = None
+    monkeypatch.setattr(
+        "scholartrace.connectors.deepxiv_connector.DeepXivConnector",
+        lambda settings=None: _FakeConnector(),
+    )
+
+    result_str = await mcp_server.read(work.id, depth="direct_evidence")
+    data = json.loads(result_str)
+
+    assert data == {
+        "paper_id": work.id,
+        "depth": "direct_evidence",
+        "available": False,
+        "source": "deepxiv",
+        "arxiv_id": "2401.00003",
+        "reason": "DeepXiv direct evidence is unavailable: DeepXiv request failed: upstream timeout",
+    }
+
+
+@pytest.mark.asyncio
 async def test_read_returns_not_found_error_for_missing_paper(test_storage):
     from scholartrace.api.mcp_server import read
 

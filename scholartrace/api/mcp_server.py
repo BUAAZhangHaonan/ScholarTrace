@@ -243,7 +243,11 @@ async def read(
     depth: str = "summary",
     allow_acquire: bool = False,
 ) -> str:
-    """Read a paper through a unified layered interface."""
+    """Read a paper through a unified layered interface.
+
+    `depth="direct_evidence"` uses the optional DeepXiv integration for
+    arXiv-backed papers and can legitimately return `available=false`.
+    """
     storage = _get_storage()
     settings = get_settings()
     theme_id, work = _resolve_public_paper_id(storage, paper_id)
@@ -280,9 +284,29 @@ async def read(
                 ensure_ascii=False,
             )
 
-        connector = await _get_deepxiv()
-        metadata = await connector.get_paper_metadata(work.arxiv_id)
-        brief = await connector.get_paper_brief(work.arxiv_id)
+        try:
+            connector = await _get_deepxiv()
+            metadata = await connector.get_paper_metadata(work.arxiv_id)
+            brief = await connector.get_paper_brief(work.arxiv_id)
+        except Exception as exc:
+            reason = str(exc) or "DeepXiv is not configured or the request failed."
+            logger.warning(
+                "DeepXiv direct evidence unavailable for %s: %s",
+                work.arxiv_id,
+                reason,
+            )
+            return json.dumps(
+                {
+                    "paper_id": paper_id,
+                    "depth": depth,
+                    "available": False,
+                    "source": "deepxiv",
+                    "arxiv_id": work.arxiv_id,
+                    "reason": f"DeepXiv direct evidence is unavailable: {reason}",
+                },
+                ensure_ascii=False,
+            )
+
         available = metadata is not None or brief is not None
         payload = {
             "paper_id": paper_id,
