@@ -1,7 +1,6 @@
-"""Tests for the MCP server tools.
+"""Tests for the public MCP product surface.
 
-Each test calls the tool functions directly (as regular async functions)
-without going through MCP transport.
+Each test calls the tool functions directly without going through MCP transport.
 """
 
 from __future__ import annotations
@@ -10,25 +9,18 @@ import asyncio
 import json
 import os
 import tempfile
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from scholartrace.models.schemas import (
-    Section,
-    Theme,
-    Work,
-)
+from scholartrace.models.schemas import Section, Theme, Work
 from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def test_storage():
-    """Create a temporary StorageService and initialise its schema."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         storage = StorageService(db_path=db_path)
@@ -38,7 +30,6 @@ def test_storage():
 
 @pytest.fixture(autouse=True)
 def _inject_storage(test_storage):
-    """Override the module-level storage in mcp_server for every test."""
     import scholartrace.api.mcp_server as mod
 
     prev = mod._storage
@@ -54,9 +45,6 @@ def _reset_runtime_budgets():
     asyncio.run(runtime_limits.budget_manager.reset())
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _make_work(**overrides) -> Work:
     defaults = {
         "title": "Test Paper",
@@ -67,17 +55,26 @@ def _make_work(**overrides) -> Work:
         "composite_score": 0.85,
         "doi": None,
         "arxiv_id": None,
+        "agent_score": 0.0,
+        "agent_rank": None,
+        "agent_rationale": None,
     }
     defaults.update(overrides)
     return Work(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# search_papers_by_theme
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_search_papers_by_theme(test_storage):
-    from scholartrace.api.mcp_server import search_papers_by_theme
+async def test_only_query_and_read_are_public_tools():
+    from scholartrace.api import mcp_server
+
+    tools = await mcp_server.mcp.list_tools()
+
+    assert sorted(tool.name for tool in tools) == ["query", "read"]
+
+
+@pytest.mark.asyncio
+async def test_query_returns_reranked_papers_with_pipeline_counts():
+    from scholartrace.api.mcp_server import query
 
     fake_theme = Theme(
         id="theme-1",
@@ -88,87 +85,282 @@ async def test_search_papers_by_theme(test_storage):
         parsed_queries=["topic-a query"],
     )
     fake_works = [
-        _make_work(title=f"Paper {i}", composite_score=0.9 - i * 0.05)
-        for i in range(12)
+        _make_work(
+            id=f"paper-{i}",
+            title=f"Paper {i}",
+            composite_score=0.9 - i * 0.05,
+            agent_score=9.0 - i,
+            agent_rank=i + 1,
+            agent_rationale=f"Reason {i}",
+        )
+        for i in range(3)
     ]
 
-    async def _fake_retrieval(doc_text, storage, settings=None):
-        # Persist theme and works so they exist in storage
+    async def _fake_query_pipeline(
+        doc_text,
+        storage,
+        settings=None,
+        *,
+        final_limit,
+        agent_candidate_limit,
+        coarse_pool_limit,
+        include_rationale,
+    ):
+        assert doc_text == "Some theme document text"
+        assert final_limit == 20
+        assert agent_candidate_limit == 100
+        assert coarse_pool_limit is None
+        assert include_rationale is True
         storage.save_theme(fake_theme)
-        for idx, w in enumerate(fake_works):
-            storage.save_work(w)
-            storage.link_theme_work(fake_theme.id, w.id, idx + 1)
-        return fake_theme, fake_works
+        for idx, work in enumerate(fake_works, start=1):
+            storage.save_work(work)
+            storage.link_theme_work(fake_theme.id, work.id, idx)
+        return SimpleNamespace(
+            theme=fake_theme,
+            total_retrieved=140,
+            total_after_dedup=60,
+            total_after_first_stage=40,
+            total_agent_candidates=20,
+            total_final=3,
+            works=fake_works,
+        )
 
     with patch(
-        "scholartrace.services.retrieval.run_retrieval_for_document",
-        new=_fake_retrieval,
+        "scholartrace.services.retrieval.run_query_pipeline",
+        new=_fake_query_pipeline,
+        create=True,
     ):
-        result_str = await search_papers_by_theme("Some theme document text")
+        result_str = await query("Some theme document text")
 
     result = json.loads(result_str)
     assert result["theme_id"] == "theme-1"
-    assert result["query_count"] == 1
-    assert result["total_papers"] == 12
-    assert len(result["top_10"]) == 10
-    assert "title" in result["top_10"][0]
-    assert "composite_score" in result["top_10"][0]
+    assert result["total_retrieved"] == 140
+    assert result["total_after_dedup"] == 60
+    assert result["total_after_first_stage"] == 40
+    assert result["total_agent_candidates"] == 20
+    assert result["total_final"] == 3
+    assert len(result["papers"]) == 3
+    assert result["papers"][0]["paper_id"] == "paper-0"
+    assert result["papers"][0]["agent_rank"] == 1
+    assert result["papers"][0]["agent_score"] == 9.0
+    assert result["papers"][0]["rationale"] == "Reason 0"
+    assert "fulltext_status" in result["papers"][0]
 
 
-# ---------------------------------------------------------------------------
-# get_ranked_papers
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_get_ranked_papers(test_storage):
-    from scholartrace.api.mcp_server import get_ranked_papers
+async def test_query_passes_explicit_limits_to_pipeline():
+    from scholartrace.api.mcp_server import query
 
-    theme = Theme(id="theme-rp", document_text="ranked papers theme")
-    test_storage.save_theme(theme)
+    fake_theme = Theme(id="theme-explicit", document_text="explicit theme")
 
-    works = [
-        _make_work(title=f"Ranked {i}", composite_score=0.9 - i * 0.1)
-        for i in range(5)
-    ]
-    for idx, w in enumerate(works):
-        test_storage.save_work(w)
-        test_storage.link_theme_work(theme.id, w.id, idx + 1)
+    async def _fake_query_pipeline(
+        doc_text,
+        storage,
+        settings=None,
+        *,
+        final_limit,
+        agent_candidate_limit,
+        coarse_pool_limit,
+        include_rationale,
+    ):
+        assert final_limit == 7
+        assert agent_candidate_limit == 13
+        assert coarse_pool_limit == 25
+        assert include_rationale is False
+        return SimpleNamespace(
+            theme=fake_theme,
+            total_retrieved=10,
+            total_after_dedup=9,
+            total_after_first_stage=8,
+            total_agent_candidates=7,
+            total_final=0,
+            works=[],
+        )
 
-    result_str = await get_ranked_papers("theme-rp", limit=3)
-    papers = json.loads(result_str)
-    assert len(papers) == 3
-    assert papers[0]["title"] == "Ranked 0"
-    assert papers[0]["composite_score"] == 0.9
+    with patch(
+        "scholartrace.services.retrieval.run_query_pipeline",
+        new=_fake_query_pipeline,
+        create=True,
+    ):
+        result_str = await query(
+            "Some theme document text",
+            final_limit=7,
+            agent_candidate_limit=13,
+            coarse_pool_limit=25,
+            include_rationale=False,
+        )
+
+    result = json.loads(result_str)
+    assert result["theme_id"] == "theme-explicit"
+    assert result["total_final"] == 0
+    assert result["papers"] == []
 
 
-# ---------------------------------------------------------------------------
-# get_paper_metadata
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_get_paper_metadata(test_storage):
-    from scholartrace.api.mcp_server import get_paper_metadata
+async def test_read_summary_returns_metadata_agent_state_and_fulltext_status(test_storage):
+    from scholartrace.api.mcp_server import read
 
-    work = _make_work(doi="10.1234/test", arxiv_id="2401.00001")
+    work = _make_work(
+        doi="10.1234/test",
+        arxiv_id="2401.00001",
+        agent_score=8.7,
+        agent_rank=2,
+        agent_rationale="Strong fit for the theme.",
+    )
     test_storage.save_work(work)
 
-    result_str = await get_paper_metadata(work.id)
+    result_str = await read(work.id, depth="summary")
     data = json.loads(result_str)
+
+    assert data["paper_id"] == work.id
+    assert data["depth"] == "summary"
     assert data["title"] == "Test Paper"
     assert data["doi"] == "10.1234/test"
-    assert data["arxiv_id"] == "2401.00001"
-    assert "composite_score" in data
-    assert "citation_count" in data
-    assert "source_provenance" not in data
-    assert "pdf_url" not in data
-    assert "html_url" not in data
-    assert "oa_url" not in data
+    assert data["agent_score"] == 8.7
+    assert data["agent_rank"] == 2
+    assert data["rationale"] == "Strong fit for the theme."
+    assert data["fulltext_status"]["fulltext_available"] is False
+    assert data["fulltext_status"]["acquisition_state"] == "missing"
 
 
 @pytest.mark.asyncio
-async def test_get_paper_metadata_not_found(test_storage):
-    from scholartrace.api.mcp_server import get_paper_metadata
+async def test_read_sections_returns_cached_sections(test_storage):
+    from scholartrace.api.mcp_server import read
 
-    result_str = await get_paper_metadata("nonexistent-id")
+    work = _make_work()
+    test_storage.save_work(work)
+    test_storage.save_section(
+        Section(
+            work_id=work.id,
+            section_title="Introduction",
+            section_order=0,
+            text_content="This is the intro.",
+        )
+    )
+    test_storage.save_section(
+        Section(
+            work_id=work.id,
+            section_title="Methods",
+            section_order=1,
+            text_content="This is the method.",
+        )
+    )
+
+    result_str = await read(work.id, depth="sections")
     data = json.loads(result_str)
+
+    assert data["paper_id"] == work.id
+    assert data["depth"] == "sections"
+    assert len(data["sections"]) == 2
+    assert data["sections"][0]["section_title"] == "Introduction"
+    assert data["sections"][1]["section_title"] == "Methods"
+
+
+@pytest.mark.asyncio
+async def test_read_fulltext_status_matches_cached_contract(test_storage):
+    from scholartrace.api.mcp_server import read
+
+    work = _make_work(fulltext_available=False)
+    test_storage.save_work(work)
+
+    result_str = await read(work.id, depth="fulltext_status")
+    data = json.loads(result_str)
+
+    assert data["paper_id"] == work.id
+    assert data["depth"] == "fulltext_status"
+    assert data["fulltext_status"]["fulltext_available"] is False
+    assert data["fulltext_status"]["needs_acquisition"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_fulltext_triggers_explicit_acquire_when_allowed(test_storage):
+    from scholartrace.api.mcp_server import read
+
+    work = _make_work(fulltext_available=False)
+    test_storage.save_work(work)
+
+    before_payload = {
+        "paper_id": work.id,
+        "title": work.title,
+        "fulltext_available": False,
+        "access_status": "unknown",
+        "acquisition_state": "missing",
+        "needs_acquisition": True,
+        "last_attempt_at": None,
+        "next_retry_at": None,
+        "error_message": None,
+        "artifacts": [],
+        "sections": [],
+        "parsed_text": None,
+    }
+    after_payload = dict(before_payload)
+    after_payload["fulltext_available"] = True
+    after_payload["acquisition_state"] = "available"
+    after_payload["needs_acquisition"] = False
+    after_payload["parsed_text"] = "Recovered full text."
+
+    async def _fake_acquire(target_work, storage, settings):
+        return target_work
+
+    with patch(
+        "scholartrace.services.fulltext.read_cached_fulltext",
+        side_effect=[before_payload, after_payload],
+    ), patch(
+        "scholartrace.services.fulltext.acquire_fulltext",
+        new=_fake_acquire,
+    ):
+        result_str = await read(work.id, depth="fulltext", allow_acquire=True)
+
+    data = json.loads(result_str)
+
+    assert data["paper_id"] == work.id
+    assert data["depth"] == "fulltext"
+    assert data["fulltext"] == "Recovered full text."
+    assert data["fulltext_status"]["fulltext_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_direct_evidence_uses_deepxiv_for_arxiv_backed_papers(
+    test_storage,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from scholartrace.api import mcp_server
+
+    work = _make_work(arxiv_id="2401.00001")
+    test_storage.save_work(work)
+
+    class _FakeConnector:
+        async def get_paper_metadata(self, arxiv_id):
+            return {"title": "DeepXiv Head", "arxiv_id": arxiv_id}
+
+        async def get_paper_brief(self, arxiv_id):
+            return {"tldr": "Brief summary", "arxiv_id": arxiv_id}
+
+    mcp_server._deepxiv_connector = None
+    monkeypatch.setattr(
+        "scholartrace.connectors.deepxiv_connector.DeepXivConnector",
+        lambda settings=None: _FakeConnector(),
+    )
+
+    result_str = await mcp_server.read(work.id, depth="direct_evidence")
+    data = json.loads(result_str)
+
+    assert data["paper_id"] == work.id
+    assert data["depth"] == "direct_evidence"
+    assert data["available"] is True
+    assert data["source"] == "deepxiv"
+    assert data["arxiv_id"] == "2401.00001"
+    assert data["evidence"]["metadata"]["title"] == "DeepXiv Head"
+    assert data["evidence"]["brief"]["tldr"] == "Brief summary"
+
+
+@pytest.mark.asyncio
+async def test_read_returns_not_found_error_for_missing_paper(test_storage):
+    from scholartrace.api.mcp_server import read
+
+    result_str = await read("nonexistent-id", depth="summary")
+    data = json.loads(result_str)
+
     assert data == {
         "error": {
             "code": "not_found",
@@ -176,249 +368,3 @@ async def test_get_paper_metadata_not_found(test_storage):
             "retryable": False,
         }
     }
-
-
-# ---------------------------------------------------------------------------
-# get_paper_sections
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_get_paper_sections(test_storage):
-    from scholartrace.api.mcp_server import get_paper_sections
-
-    work = _make_work()
-    test_storage.save_work(work)
-
-    sections = [
-        Section(
-            work_id=work.id,
-            section_title="Introduction",
-            section_order=0,
-            text_content="This is the intro.",
-        ),
-        Section(
-            work_id=work.id,
-            section_title="Methods",
-            section_order=1,
-            text_content="We used a method.",
-        ),
-    ]
-    for s in sections:
-        test_storage.save_section(s)
-
-    result_str = await get_paper_sections(work.id)
-    data = json.loads(result_str)
-    assert len(data) == 2
-    assert data[0]["section_title"] == "Introduction"
-    assert data[1]["section_title"] == "Methods"
-    assert data[0]["text_content"] == "This is the intro."
-
-
-# ---------------------------------------------------------------------------
-# get_paper_fulltext
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_get_paper_fulltext(test_storage):
-    from scholartrace.api.mcp_server import get_paper_fulltext
-
-    work = _make_work(fulltext_available=False)
-    test_storage.save_work(work)
-
-    result_str = await get_paper_fulltext(work.id)
-
-    data = json.loads(result_str)
-    assert data["paper_id"] == work.id
-    assert data["fulltext_available"] is False
-    assert data["acquisition_state"] == "missing"
-    assert data["needs_acquisition"] is True
-
-
-@pytest.mark.asyncio
-async def test_acquire_paper_fulltext(test_storage):
-    from scholartrace.api.mcp_server import acquire_paper_fulltext
-
-    work = _make_work(fulltext_available=False)
-    test_storage.save_work(work)
-
-    async def _fake_acquire(target_work, storage, settings):
-        target_work.fulltext_available = True
-        test_storage.save_work(target_work)
-        return target_work
-
-    with patch(
-        "scholartrace.services.fulltext.acquire_fulltext",
-        new=_fake_acquire,
-    ):
-        result_str = await acquire_paper_fulltext(work.id)
-
-    data = json.loads(result_str)
-    assert data["fulltext_available"] is True
-    assert data["acquisition_state"] == "available"
-    assert data["needs_acquisition"] is False
-
-
-# ---------------------------------------------------------------------------
-# get_related_papers
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_get_related_papers(test_storage):
-    from scholartrace.api.mcp_server import get_related_papers
-
-    # Seed paper
-    seed = _make_work(title="Seed Paper", year=2024,
-                      venue="NeurIPS", composite_score=0.9)
-    test_storage.save_work(seed)
-
-    # Related papers (same venue, close year)
-    related = [
-        _make_work(
-            title=f"Related {i}",
-            year=2023 + i,
-            venue="NeurIPS",
-            composite_score=0.8 - i * 0.1,
-        )
-        for i in range(3)
-    ]
-    for w in related:
-        test_storage.save_work(w)
-
-    # Unrelated (different venue)
-    unrelated = _make_work(
-        title="Unrelated", year=2024, venue="ICML", composite_score=0.99
-    )
-    test_storage.save_work(unrelated)
-
-    result_str = await get_related_papers(seed.id, limit=5)
-    data = json.loads(result_str)
-    assert len(data) == 3
-    titles = [p["title"] for p in data]
-    assert "Unrelated" not in titles
-    assert all(t.startswith("Related") for t in titles)
-
-
-# ---------------------------------------------------------------------------
-# export_theme_report
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_export_theme_report_json(test_storage):
-    from scholartrace.api.mcp_server import export_theme_report
-
-    theme = Theme(
-        id="theme-export",
-        document_text="export test",
-        parsed_topics=["topic-a"],
-        parsed_methods=["RL"],
-        parsed_datasets=["MMLU"],
-        parsed_queries=["topic-a query"],
-    )
-    test_storage.save_theme(theme)
-
-    works = [
-        _make_work(title=f"Export {i}", composite_score=0.7 + i * 0.05)
-        for i in range(3)
-    ]
-    for idx, w in enumerate(works):
-        test_storage.save_work(w)
-        test_storage.link_theme_work(theme.id, w.id, idx + 1)
-
-    result_str = await export_theme_report("theme-export", format="json")
-    data = json.loads(result_str)
-    assert data["theme_id"] == "theme-export"
-    assert data["total_papers"] == 3
-    assert len(data["papers"]) == 3
-    assert data["parsed_topics"] == ["topic-a"]
-    assert "source_provenance" not in data["papers"][0]
-    assert "pdf_url" not in data["papers"][0]
-    assert "html_url" not in data["papers"][0]
-    assert "oa_url" not in data["papers"][0]
-
-
-@pytest.mark.asyncio
-async def test_export_theme_report_markdown(test_storage):
-    from scholartrace.api.mcp_server import export_theme_report
-
-    theme = Theme(
-        id="theme-md",
-        document_text="markdown export test",
-        parsed_topics=["topic-a", "topic-b"],
-        parsed_methods=[],
-    )
-    test_storage.save_theme(theme)
-
-    works = [_make_work(title="MD Paper 1", composite_score=0.88)]
-    for idx, w in enumerate(works):
-        test_storage.save_work(w)
-        test_storage.link_theme_work(theme.id, w.id, idx + 1)
-
-    result_str = await export_theme_report("theme-md", format="markdown")
-    assert "# Theme Report:" in result_str
-    assert "topic-a" in result_str
-    assert "MD Paper 1" in result_str
-    assert "0.8800" in result_str
-
-
-@pytest.mark.asyncio
-async def test_export_theme_report_not_found(test_storage):
-    from scholartrace.api.mcp_server import export_theme_report
-
-    result_str = await export_theme_report("nonexistent-theme")
-    data = json.loads(result_str)
-    assert data == {
-        "error": {
-            "code": "not_found",
-            "message": "Theme nonexistent-theme not found",
-            "retryable": False,
-        }
-    }
-
-
-@pytest.mark.asyncio
-async def test_deepxiv_mcp_summary_and_search_contract_are_public_and_thin(monkeypatch):
-    from scholartrace.api import mcp_server
-
-    class _FakeConnector:
-        async def search(self, *args, **kwargs):
-            from types import SimpleNamespace
-
-            return [
-                SimpleNamespace(
-                    title="DeepXiv Search Paper",
-                    authors=["Alice", "Bob"],
-                    year=2024,
-                    abstract="A long abstract for DeepXiv search payload parity.",
-                    arxiv_id="2401.00001",
-                    doi="10.1234/deepxiv",
-                    citation_count=7,
-                )
-            ]
-
-        async def get_paper_metadata(self, arxiv_id):
-            return {"title": "DeepXiv Head", "arxiv_id": arxiv_id, "pdf_url": "https://leak.example/paper.pdf"}
-
-        async def get_paper_brief(self, arxiv_id):
-            return {"tldr": "Brief summary"}
-
-    mcp_server._deepxiv_connector = None
-    monkeypatch.setattr("scholartrace.connectors.deepxiv_connector.DeepXivConnector", lambda settings=None: _FakeConnector())
-
-    search_payload = json.loads(await mcp_server.deepxiv_search("parity", max_results=5))
-    assert search_payload == {
-        "total": 1,
-        "papers": [
-            {
-                "title": "DeepXiv Search Paper",
-                "authors": ["Alice", "Bob"],
-                "year": 2024,
-                "abstract": "A long abstract for DeepXiv search payload parity.",
-                "arxiv_id": "2401.00001",
-                "doi": "10.1234/deepxiv",
-                "citation_count": 7,
-            }
-        ],
-    }
-
-    summary_payload = json.loads(await mcp_server.deepxiv_paper_summary("2401.00001"))
-    assert summary_payload["arxiv_id"] == "2401.00001"
-    assert "metadata" in summary_payload
-    assert "brief" in summary_payload
-    assert "head" not in summary_payload
-    assert "pdf_url" not in summary_payload["metadata"]

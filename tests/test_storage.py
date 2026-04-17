@@ -76,6 +76,22 @@ class TestWorkCRUD:
         assert fetched.citation_count == 100000
         assert fetched.source_provenance == ["openalex", "semantic_scholar"]
 
+    def test_save_and_get_work_preserves_agent_rerank_fields(self, storage):
+        work = Work(
+            title="Agent Ranked Paper",
+            doi="10.1111/agent-paper",
+            agent_score=8.9,
+            agent_rank=3,
+            agent_rationale="Matches the target theme closely.",
+        )
+        storage.save_work(work)
+
+        fetched = storage.get_work(work.id)
+        assert fetched is not None
+        assert fetched.agent_score == 8.9
+        assert fetched.agent_rank == 3
+        assert fetched.agent_rationale == "Matches the target theme closely."
+
     def test_get_work_by_doi(self, storage):
         work = Work(
             title="BERT",

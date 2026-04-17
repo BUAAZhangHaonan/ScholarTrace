@@ -106,6 +106,9 @@ class StorageService:
                     influence_score REAL DEFAULT 0,
                     venue_score REAL DEFAULT 0,
                     composite_score REAL DEFAULT 0,
+                    agent_score REAL DEFAULT 0,
+                    agent_rank INTEGER,
+                    agent_rationale TEXT,
                     fulltext_available INTEGER DEFAULT 0,
                     access_status TEXT DEFAULT 'unknown',
                     source_provenance TEXT,
@@ -198,7 +201,22 @@ class StorageService:
                     ON fulltext_states(next_retry_at);
                 """
             )
+            self._ensure_work_columns(conn)
             self._ensure_indexes(conn)
+
+    def _ensure_work_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(works)").fetchall()
+        }
+        additions = [
+            ("agent_score", "ALTER TABLE works ADD COLUMN agent_score REAL DEFAULT 0"),
+            ("agent_rank", "ALTER TABLE works ADD COLUMN agent_rank INTEGER"),
+            ("agent_rationale", "ALTER TABLE works ADD COLUMN agent_rationale TEXT"),
+        ]
+        for column, statement in additions:
+            if column not in columns:
+                conn.execute(statement)
 
     def _ensure_indexes(self, conn: sqlite3.Connection) -> None:
         statements = [
@@ -298,6 +316,9 @@ class StorageService:
             influence_score=row["influence_score"] or 0.0,
             venue_score=row["venue_score"] or 0.0,
             composite_score=row["composite_score"] or 0.0,
+            agent_score=row["agent_score"] or 0.0,
+            agent_rank=row["agent_rank"],
+            agent_rationale=row["agent_rationale"],
             fulltext_available=bool(row["fulltext_available"]),
             access_status=AccessStatus(row["access_status"] or AccessStatus.UNKNOWN.value),
             source_provenance=self._json_to_list(row["source_provenance"]),
@@ -436,6 +457,9 @@ class StorageService:
         merged.influence_score = incoming.influence_score or merged.influence_score
         merged.venue_score = incoming.venue_score or merged.venue_score
         merged.composite_score = incoming.composite_score or merged.composite_score
+        merged.agent_score = incoming.agent_score or merged.agent_score
+        merged.agent_rank = incoming.agent_rank if incoming.agent_rank is not None else merged.agent_rank
+        merged.agent_rationale = incoming.agent_rationale or merged.agent_rationale
         merged.fulltext_available = merged.fulltext_available or incoming.fulltext_available
         merged.access_status = self._best_access_status(merged.access_status, incoming.access_status)
         merged.source_provenance = self._merge_lists(
@@ -458,10 +482,11 @@ class StorageService:
                 id, doi, arxiv_id, openalex_id, s2_id, dblp_key, openreview_id,
                 title, authors, year, venue, abstract,
                 relevance_score, recency_score, influence_score, venue_score, composite_score,
+                agent_score, agent_rank, agent_rationale,
                 fulltext_available, access_status, source_provenance,
                 citation_count, reference_count, pdf_url, html_url, oa_url,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 doi = excluded.doi,
                 arxiv_id = excluded.arxiv_id,
@@ -479,6 +504,9 @@ class StorageService:
                 influence_score = excluded.influence_score,
                 venue_score = excluded.venue_score,
                 composite_score = excluded.composite_score,
+                agent_score = excluded.agent_score,
+                agent_rank = excluded.agent_rank,
+                agent_rationale = excluded.agent_rationale,
                 fulltext_available = excluded.fulltext_available,
                 access_status = excluded.access_status,
                 source_provenance = excluded.source_provenance,
@@ -508,6 +536,9 @@ class StorageService:
                 work.influence_score,
                 work.venue_score,
                 work.composite_score,
+                work.agent_score,
+                work.agent_rank,
+                work.agent_rationale,
                 int(work.fulltext_available),
                 work.access_status.value,
                 self._list_to_json(work.source_provenance),

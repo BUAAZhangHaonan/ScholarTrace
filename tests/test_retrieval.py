@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -19,6 +20,7 @@ from scholartrace.models.schemas import (
 from scholartrace.services.retrieval import (
     run_retrieval,
     run_retrieval_for_document,
+    run_query_pipeline,
 )
 from scholartrace.services.storage import StorageService
 
@@ -731,3 +733,184 @@ class TestRetrievalForDocument:
         # Theme is persisted
         fetched_theme = storage.get_theme(theme.id)
         assert fetched_theme is not None
+
+
+class TestQueryPipeline:
+    def test_run_query_pipeline_applies_agent_rerank_and_persists_final_results(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = Theme(
+            id="theme-query",
+            document_text="query theme",
+            parsed_topics=["alignment"],
+            parsed_methods=["rerank"],
+            parsed_datasets=[],
+            parsed_queries=["alignment rerank"],
+        )
+        settings = Settings(
+            bigmodel_api_key="glm-key",
+            agent_candidate_limit=3,
+            final_limit=2,
+        )
+
+        cands = [
+            _make_candidate("Alignment Paper Alpha", doi="10.1/a", openalex_id="W1"),
+            _make_candidate("Reward Modeling Beta", doi="10.1/b", openalex_id="W2"),
+            _make_candidate("Preference Tuning Gamma", doi="10.1/c", openalex_id="W3"),
+            _make_candidate("Safety Evaluation Delta", doi="10.1/d", openalex_id="W4"),
+        ]
+        mock_connectors = [
+            _make_mock_connector("openalex", cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        class _FakeAgent:
+            def __init__(self, *args, **kwargs):
+                self.closed = False
+
+            async def rerank_papers(self, papers, question):
+                assert len(papers) == 3
+                assert question == "query theme"
+                return [
+                    {
+                        "index": 1,
+                        "selected": True,
+                        "agent_score": 9.5,
+                        "agent_rank": 1,
+                        "agent_rationale": "Best fit.",
+                    },
+                    {
+                        "index": 0,
+                        "selected": True,
+                        "agent_score": 8.5,
+                        "agent_rank": 2,
+                        "agent_rationale": "Good fit.",
+                    },
+                    {
+                        "index": 2,
+                        "selected": False,
+                        "agent_score": 4.0,
+                        "agent_rank": 3,
+                        "agent_rationale": "Weak fit.",
+                    },
+                ]
+
+            async def close(self):
+                self.closed = True
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
+        monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _FakeAgent)
+
+        result = _run(
+            run_query_pipeline(
+                "query theme",
+                storage,
+                settings=settings,
+            )
+        )
+
+        assert result.theme.id == "theme-query"
+        assert result.total_retrieved == 4
+        assert result.total_after_dedup == 4
+        assert result.total_after_first_stage == 4
+        assert result.total_agent_candidates == 3
+        assert result.total_final == 2
+        assert [work.title for work in result.works] == [
+            "Reward Modeling Beta",
+            "Alignment Paper Alpha",
+        ]
+        assert result.works[0].agent_rank == 1
+        assert result.works[0].agent_score == 9.5
+        assert result.works[0].agent_rationale == "Best fit."
+
+        stored = storage.list_works_by_theme(theme.id, limit=10)
+        assert [work.title for work in stored] == [
+            "Reward Modeling Beta",
+            "Alignment Paper Alpha",
+        ]
+
+    def test_run_query_pipeline_uses_explicit_limits(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = Theme(
+            id="theme-query-explicit",
+            document_text="explicit query theme",
+            parsed_queries=["explicit query theme"],
+        )
+        settings = Settings(bigmodel_api_key="glm-key")
+
+        cands = [
+            _make_candidate("Alignment Paper Alpha", doi="10.2/a", openalex_id="W10"),
+            _make_candidate("Reward Modeling Beta", doi="10.2/b", openalex_id="W11"),
+            _make_candidate("Preference Tuning Gamma", doi="10.2/c", openalex_id="W12"),
+            _make_candidate("Safety Evaluation Delta", doi="10.2/d", openalex_id="W13"),
+        ]
+        mock_connectors = [
+            _make_mock_connector("openalex", cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        class _FakeAgent:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def rerank_papers(self, papers, question):
+                assert len(papers) == 2
+                return [
+                    {
+                        "index": 1,
+                        "selected": True,
+                        "agent_score": 9.0,
+                        "agent_rank": 1,
+                        "agent_rationale": "Best fit.",
+                    },
+                    {
+                        "index": 0,
+                        "selected": True,
+                        "agent_score": 8.0,
+                        "agent_rank": 2,
+                        "agent_rationale": "Second best.",
+                    },
+                ]
+
+            async def close(self):
+                return None
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
+        monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _FakeAgent)
+
+        result = _run(
+            run_query_pipeline(
+                "explicit query theme",
+                storage,
+                settings=settings,
+                coarse_pool_limit=2,
+                agent_candidate_limit=2,
+                final_limit=1,
+            )
+        )
+
+        assert result.total_after_first_stage == 4
+        assert result.total_agent_candidates == 2
+        assert result.total_final == 1
+        assert [work.title for work in result.works] == ["Reward Modeling Beta"]

@@ -64,6 +64,9 @@ class Work(BaseModel):
     influence_score: float = 0.0
     venue_score: float = 0.0
     composite_score: float = 0.0
+    agent_score: float = 0.0
+    agent_rank: int | None = None
+    agent_rationale: str | None = None
     fulltext_available: bool = False
     access_status: AccessStatus = AccessStatus.UNKNOWN
     source_provenance: list[str] = Field(default_factory=list)

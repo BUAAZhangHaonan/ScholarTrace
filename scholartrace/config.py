@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     max_results_per_source_per_query: int = 200
     target_candidate_pool: int = 500
     max_fulltext_downloads: int = 50
+    agent_candidate_limit: int = 100
+    final_limit: int = 20
 
     # --- Ranking weights ---
     weight_relevance: float = 0.35

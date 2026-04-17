@@ -35,7 +35,9 @@ def test_rest_and_mcp_cached_fulltext_payloads_match():
         asyncio.run(runtime_limits.budget_manager.reset())
 
         rest_payload = TestClient(app).get(f"/papers/{work.id}/fulltext").json()
-        mcp_payload = json.loads(asyncio.run(mcp_module.get_paper_fulltext(work.id)))
+        mcp_payload = json.loads(
+            asyncio.run(mcp_module.read(work.id, depth="fulltext_status"))
+        )["fulltext_status"]
 
         for key in (
             "paper_id",

@@ -1,12 +1,4 @@
-"""Lightweight DeepXiv agent for filtering papers via BigModel GLM.
-
-Unlike the full DeepXiv SDK agent (which depends on langgraph + langchain),
-this uses direct OpenAI-compatible API calls to the BigModel GLM endpoint
-that ScholarTrace already has configured.
-
-The agent takes a list of paper summaries and a research question,
-then returns which papers are relevant and why.
-"""
+"""Lightweight DeepXiv agent for GLM-based reranking."""
 
 from __future__ import annotations
 
@@ -41,18 +33,12 @@ Only select papers with relevance >= 5. Max 20 papers can be selected.
 Return ONLY the JSON array, no other text."""
 
 
+class DeepXivAgentError(RuntimeError):
+    """Raised when GLM reranking cannot produce a trustworthy result."""
+
+
 class DeepXivAgent:
-    """Agent that filters papers using GLM LLM.
-
-    Uses the BigModel GLM API (OpenAI-compatible) that ScholarTrace
-    already has configured in .env.
-
-    Args:
-        api_key: BigModel API key
-        base_url: BigModel API base URL
-        model: Model name (default: glm-5-turbo)
-        max_fulltext: Max number of full texts to fetch for detailed analysis
-    """
+    """Agent that reranks papers using the configured BigModel GLM endpoint."""
 
     def __init__(
         self,
@@ -72,71 +58,90 @@ class DeepXivAgent:
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def rerank_papers(
+        self,
+        papers: list[dict[str, Any]],
+        question: str,
+        *,
+        strict: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return all candidate papers in reranked order with agent scores."""
+        if not papers:
+            return []
+        if not self._api_key:
+            raise DeepXivAgentError("BigModel API key is not configured")
+
+        filter_results = await self._call_llm_filter(papers, question, strict=strict)
+        reranked: list[dict[str, Any]] = []
+        for result in filter_results:
+            score = (
+                float(result.get("relevance", 0) or 0)
+                + float(result.get("novelty", 0) or 0) * 0.5
+                + float(result.get("quality", 0) or 0) * 0.3
+            )
+            reranked.append(
+                {
+                    "index": result.get("index"),
+                    "selected": bool(result.get("selected")),
+                    "agent_score": score,
+                    "agent_rationale": result.get("reason", ""),
+                }
+            )
+
+        reranked.sort(
+            key=lambda item: (
+                not item.get("selected", False),
+                -float(item.get("agent_score", 0.0) or 0.0),
+                item.get("index", 0),
+            )
+        )
+        for rank, item in enumerate(reranked, start=1):
+            item["agent_rank"] = rank
+        return reranked
+
     async def filter_papers(
         self,
         papers: list[dict[str, Any]],
         question: str,
     ) -> list[dict[str, Any]]:
-        """Filter papers by relevance to a research question.
-
-        Args:
-            papers: List of dicts with at least 'title' and 'abstract'.
-            question: The research question or topic.
-
-        Returns:
-            Filtered list with added 'agent_score' and 'agent_reason' fields.
-        """
+        """Preserve the legacy direct-agent behavior for REST-only flows."""
         if not papers:
             return []
-        if not self._api_key:
-            logger.error("DeepXiv agent filtering refused: BigModel API key is not configured")
+
+        try:
+            reranked = await self.rerank_papers(papers, question, strict=False)
+        except DeepXivAgentError as exc:
+            logger.error("DeepXiv agent filtering failed: %s", exc)
             return []
 
-        # Step 1: Filter based on title + abstract
-        filter_results = await self._call_llm_filter(papers, question)
-
-        # Step 2: For selected papers, optionally get full text for deeper analysis
-        selected_indices = [r["index"] for r in filter_results if r.get("selected")]
-
-        # Enrich selected papers with DeepXiv content if they have arxiv_id
-        enriched = []
-        for idx in selected_indices[:self._max_fulltext]:
-            paper = papers[idx]
-            enriched.append({
-                **paper,
-                "agent_score": {
-                    "relevance": filter_results[idx].get("relevance", 0),
-                    "novelty": filter_results[idx].get("novelty", 0),
-                    "quality": filter_results[idx].get("quality", 0),
-                },
-                "agent_reason": filter_results[idx].get("reason", ""),
-            })
-
-        # Sort by combined score
-        enriched.sort(
-            key=lambda p: (
-                p.get("agent_score", {}).get("relevance", 0)
-                + p.get("agent_score", {}).get("novelty", 0) * 0.5
-                + p.get("agent_score", {}).get("quality", 0) * 0.3
-            ),
-            reverse=True,
-        )
-
-        return enriched
+        enriched: list[dict[str, Any]] = []
+        for item in reranked:
+            if not item.get("selected"):
+                continue
+            index = item.get("index")
+            if not isinstance(index, int) or not (0 <= index < len(papers)):
+                continue
+            enriched.append(
+                {
+                    **papers[index],
+                    "agent_score": item["agent_score"],
+                    "agent_rank": item["agent_rank"],
+                    "agent_reason": item["agent_rationale"],
+                }
+            )
+        return enriched[: self._max_fulltext]
 
     async def _call_llm_filter(
         self,
         papers: list[dict[str, Any]],
         question: str,
+        *,
+        strict: bool,
     ) -> list[dict[str, Any]]:
-        """Call GLM to filter papers. Returns list of filter result dicts."""
         fixed_messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
         question_text = self._prompt_budget.truncate_text(question, 2_000)
 
-        paper_snippets = [
-            self._paper_snippet(paper)
-            for paper in papers
-        ]
+        paper_snippets = [self._paper_snippet(paper) for paper in papers]
         batches = self._prompt_budget.pack_items(
             paper_snippets,
             fixed_messages=fixed_messages,
@@ -148,7 +153,11 @@ class DeepXivAgent:
         for batch_snippets in batches:
             batch_size = len(batch_snippets)
             batch_papers = papers[start:start + batch_size]
-            batch_results = await self._call_llm_filter_batch(batch_papers, question_text)
+            batch_results = await self._call_llm_filter_batch(
+                batch_papers,
+                question_text,
+                strict=strict,
+            )
             for result in batch_results:
                 local_index = result.get("index")
                 if not isinstance(local_index, int):
@@ -172,11 +181,10 @@ class DeepXivAgent:
         self,
         papers: list[dict[str, Any]],
         question: str,
+        *,
+        strict: bool,
     ) -> list[dict[str, Any]]:
-        paper_lines = [
-            f"[{i}] {self._paper_snippet(paper)}"
-            for i, paper in enumerate(papers)
-        ]
+        paper_lines = [f"[{i}] {self._paper_snippet(paper)}" for i, paper in enumerate(papers)]
         user_msg = f"Research Question: {question}\n\nPapers:\n{chr(10).join(paper_lines)}"
 
         try:
@@ -195,33 +203,44 @@ class DeepXivAgent:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            logger.error("GLM API error: %s", exc.response.status_code)
+            if not strict:
+                return self._default_filter(len(papers))
+            raise DeepXivAgentError(
+                f"GLM request failed with status {exc.response.status_code}"
+            ) from exc
+        except (KeyError, IndexError) as exc:
+            logger.error("Invalid GLM response structure: %s", exc)
+            if not strict:
+                return self._default_filter(len(papers))
+            raise DeepXivAgentError("GLM response was missing the expected content") from exc
 
-            # Parse JSON from response
-            # Handle cases where LLM wraps in markdown code blocks
-            content = content.strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1]
-            if content.endswith("```"):
-                content = content.rsplit("```", 1)[0]
-            content = content.strip()
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1]
+        if content.endswith("```"):
+            content = content.rsplit("```", 1)[0]
+        content = content.strip()
 
+        try:
             results = json.loads(content)
-            if isinstance(results, list):
-                return results
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse LLM filter response: %s", exc)
+            if not strict:
+                return self._default_filter(len(papers))
+            raise DeepXivAgentError("GLM reranking returned invalid JSON") from exc
 
-            logger.warning("Unexpected LLM response format: %s", type(results))
-            return self._default_filter(len(papers))
+        if isinstance(results, list):
+            return results
 
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            logger.error("Failed to parse LLM filter response: %s", e)
+        logger.warning("Unexpected LLM response format: %s", type(results))
+        if not strict:
             return self._default_filter(len(papers))
-        except httpx.HTTPStatusError as e:
-            logger.error("GLM API error: %s", e.response.status_code)
-            return self._default_filter(len(papers))
+        raise DeepXivAgentError("GLM reranking returned an unexpected payload format")
 
     @staticmethod
     def _default_filter(count: int) -> list[dict[str, Any]]:
-        """Safe degraded fallback: select nothing when filtering fails."""
         return [
             {
                 "index": i,

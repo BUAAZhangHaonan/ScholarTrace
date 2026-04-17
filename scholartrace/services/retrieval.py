@@ -1,9 +1,11 @@
-"""Core retrieval orchestration: fan-out queries across all sources, dedup, rank, and store."""
+"""Core retrieval orchestration for ScholarTrace."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 from scholartrace.config import Settings, get_settings
 from scholartrace.connectors.arxiv import ArxivConnector
@@ -14,12 +16,25 @@ from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openalex import OpenAlexConnector
 from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
+from scholartrace.deepxiv.agent import DeepXivAgent
 from scholartrace.models.schemas import RawCandidate, Theme, Work
 from scholartrace.services.dedup import deduplicate_candidates
 from scholartrace.services.ranking import rank_papers
 from scholartrace.services.storage import StorageService
+from scholartrace.services.theme_parser import parse_theme
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class QueryPipelineResult:
+    theme: Theme
+    total_retrieved: int
+    total_after_dedup: int
+    total_after_first_stage: int
+    total_agent_candidates: int
+    total_final: int
+    works: list[Work]
 
 
 def _has_usable_deepxiv_tokens(settings: Settings) -> bool:
@@ -43,6 +58,9 @@ def _candidate_to_work(candidate: RawCandidate) -> Work:
         citation_count=candidate.citation_count,
         reference_count=candidate.reference_count,
         source_provenance=candidate.source_provenance,
+        pdf_url=candidate.pdf_url,
+        html_url=candidate.html_url,
+        oa_url=candidate.oa_url,
     )
 
 
@@ -94,33 +112,21 @@ async def _fan_out_query(
     return candidates
 
 
-async def run_retrieval(
+async def _collect_ranked_works(
     theme: Theme,
     storage: StorageService,
-    settings: Settings | None = None,
-) -> list[Work]:
-    """Execute the full retrieval pipeline for a Theme.
-
-    Steps:
-    1. Fan out each parsed query across the configured unified connectors concurrently.
-       DeepXiv joins this fan-out when its runtime is configured.
-    2. Aggregate, deduplicate, convert to Work objects.
-    3. Rank by composite score, persist to storage atomically, link to theme.
-    4. Return the ranked list.
-    """
-    if settings is None:
-        settings = get_settings()
-
+    settings: Settings,
+) -> tuple[list[Work], int, int]:
     connectors = _build_connectors(settings)
-
     try:
         storage.save_theme(theme)
 
-        # --- Fan-out across queries and sources ---
         all_candidates: list[RawCandidate] = []
         for query in theme.parsed_queries:
             query_candidates = await _fan_out_query(
-                connectors, query, settings.max_results_per_source_per_query
+                connectors,
+                query,
+                settings.max_results_per_source_per_query,
             )
             all_candidates.extend(query_candidates)
 
@@ -130,30 +136,124 @@ async def run_retrieval(
             len(theme.parsed_queries),
         )
 
-        # --- Deduplicate ---
         deduped = deduplicate_candidates(all_candidates)
         logger.info("After dedup: %d candidates", len(deduped))
 
-        # --- Convert to Work objects ---
-        works = [_candidate_to_work(c) for c in deduped]
+        works = [_candidate_to_work(candidate) for candidate in deduped]
+        ranked = rank_papers(works, theme)
+        return ranked, len(all_candidates), len(deduped)
+    finally:
+        await asyncio.gather(
+            *[connector.close() for connector in connectors],
+            return_exceptions=True,
+        )
 
-        # --- Rank ---
-        works = rank_papers(works, theme)
 
-        works = storage.replace_theme_results(theme.id, works)
+def _annotated_work(work: Work, rerank: dict[str, Any]) -> Work:
+    annotated = work.model_copy(deep=True)
+    annotated.agent_score = float(rerank.get("agent_score", 0.0) or 0.0)
+    annotated.agent_rank = rerank.get("agent_rank")
+    annotated.agent_rationale = rerank.get("agent_rationale")
+    return annotated
 
+
+async def run_retrieval(
+    theme: Theme,
+    storage: StorageService,
+    settings: Settings | None = None,
+) -> list[Work]:
+    """Execute the broad retrieval pipeline used by the REST layer."""
+    resolved = settings or get_settings()
+
+    try:
+        ranked, _, _ = await _collect_ranked_works(theme, storage, resolved)
+        works = storage.replace_theme_results(theme.id, ranked)
         logger.info("Retrieval complete: %d works saved for theme %s", len(works), theme.id)
         return works
-
     except Exception:
         logger.exception("Retrieval failed for theme %s", theme.id)
         raise
 
-    finally:
-        # Always close connectors to release httpx clients
-        await asyncio.gather(
-            *[c.close() for c in connectors], return_exceptions=True
+
+async def run_query_pipeline(
+    document_text: str,
+    storage: StorageService,
+    settings: Settings | None = None,
+    *,
+    final_limit: int | None = None,
+    agent_candidate_limit: int | None = None,
+    coarse_pool_limit: int | None = None,
+    include_rationale: bool = True,
+) -> QueryPipelineResult:
+    """Execute the MCP query pipeline with built-in DeepXiv agent reranking."""
+    del include_rationale  # payload shaping decides whether rationale is exposed.
+
+    resolved = settings or get_settings()
+    if not resolved.bigmodel_api_key.strip():
+        raise ValueError("SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking")
+
+    theme = parse_theme(document_text)
+    ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
+        theme,
+        storage,
+        resolved,
+    )
+
+    total_after_first_stage = len(ranked)
+    coarse_limit = coarse_pool_limit or resolved.target_candidate_pool
+    coarse_pool = ranked[: max(1, coarse_limit)] if ranked else []
+    candidate_limit = agent_candidate_limit or resolved.agent_candidate_limit
+    agent_candidates = coarse_pool[: max(1, candidate_limit)] if coarse_pool else []
+
+    agent = DeepXivAgent(
+        api_key=resolved.bigmodel_api_key,
+        base_url=resolved.bigmodel_base_url,
+        model=resolved.bigmodel_model,
+    )
+    try:
+        reranked = await agent.rerank_papers(
+            [
+                {
+                    "title": work.title,
+                    "abstract": work.abstract or "",
+                    "authors": work.authors,
+                    "year": work.year,
+                    "venue": work.venue,
+                }
+                for work in agent_candidates
+            ],
+            theme.document_text,
         )
+    finally:
+        await agent.close()
+
+    annotated: list[Work] = []
+    for rerank in reranked:
+        index = rerank.get("index")
+        if not isinstance(index, int) or not (0 <= index < len(agent_candidates)):
+            continue
+        annotated.append(_annotated_work(agent_candidates[index], rerank))
+
+    if not annotated:
+        raise ValueError("Agent reranking returned no scored papers")
+
+    requested_final = final_limit or resolved.final_limit
+    final_works = annotated[: max(1, requested_final)]
+    saved = storage.replace_theme_results(theme.id, final_works)
+    logger.info(
+        "MCP query pipeline complete: %d final works saved for theme %s",
+        len(saved),
+        theme.id,
+    )
+    return QueryPipelineResult(
+        theme=theme,
+        total_retrieved=total_retrieved,
+        total_after_dedup=total_after_dedup,
+        total_after_first_stage=total_after_first_stage,
+        total_agent_candidates=len(agent_candidates),
+        total_final=len(saved),
+        works=saved,
+    )
 
 
 async def run_retrieval_for_document(
@@ -161,9 +261,7 @@ async def run_retrieval_for_document(
     storage: StorageService,
     settings: Settings | None = None,
 ) -> tuple[Theme, list[Work]]:
-    """Convenience: parse a document into a Theme, then run the full retrieval pipeline."""
-    from scholartrace.services.theme_parser import parse_theme
-
+    """Convenience: parse a document into a Theme, then run the broad retrieval pipeline."""
     theme = parse_theme(document_text)
     storage.save_theme(theme)
 
