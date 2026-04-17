@@ -160,6 +160,10 @@ class StorageService:
                     theme_id TEXT NOT NULL,
                     work_id TEXT NOT NULL,
                     rank_order INTEGER,
+                    composite_score REAL,
+                    agent_score REAL,
+                    agent_rank INTEGER,
+                    agent_rationale TEXT,
                     PRIMARY KEY (theme_id, work_id),
                     FOREIGN KEY(theme_id) REFERENCES themes(id) ON DELETE CASCADE,
                     FOREIGN KEY(work_id) REFERENCES works(id) ON DELETE CASCADE
@@ -202,6 +206,7 @@ class StorageService:
                 """
             )
             self._ensure_work_columns(conn)
+            self._ensure_theme_work_columns(conn)
             self._ensure_indexes(conn)
 
     def _ensure_work_columns(self, conn: sqlite3.Connection) -> None:
@@ -213,6 +218,21 @@ class StorageService:
             ("agent_score", "ALTER TABLE works ADD COLUMN agent_score REAL DEFAULT 0"),
             ("agent_rank", "ALTER TABLE works ADD COLUMN agent_rank INTEGER"),
             ("agent_rationale", "ALTER TABLE works ADD COLUMN agent_rationale TEXT"),
+        ]
+        for column, statement in additions:
+            if column not in columns:
+                conn.execute(statement)
+
+    def _ensure_theme_work_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(theme_works)").fetchall()
+        }
+        additions = [
+            ("composite_score", "ALTER TABLE theme_works ADD COLUMN composite_score REAL"),
+            ("agent_score", "ALTER TABLE theme_works ADD COLUMN agent_score REAL"),
+            ("agent_rank", "ALTER TABLE theme_works ADD COLUMN agent_rank INTEGER"),
+            ("agent_rationale", "ALTER TABLE theme_works ADD COLUMN agent_rationale TEXT"),
         ]
         for column, statement in additions:
             if column not in columns:
@@ -457,9 +477,6 @@ class StorageService:
         merged.influence_score = incoming.influence_score or merged.influence_score
         merged.venue_score = incoming.venue_score or merged.venue_score
         merged.composite_score = incoming.composite_score or merged.composite_score
-        merged.agent_score = incoming.agent_score or merged.agent_score
-        merged.agent_rank = incoming.agent_rank if incoming.agent_rank is not None else merged.agent_rank
-        merged.agent_rationale = incoming.agent_rationale or merged.agent_rationale
         merged.fulltext_available = merged.fulltext_available or incoming.fulltext_available
         merged.access_status = self._best_access_status(merged.access_status, incoming.access_status)
         merged.source_provenance = self._merge_lists(
@@ -565,7 +582,11 @@ class StorageService:
             "sections": 0,
         }
         theme_rows = conn.execute(
-            "SELECT theme_id, rank_order FROM theme_works WHERE work_id = ?",
+            """
+            SELECT theme_id, rank_order, composite_score, agent_score, agent_rank, agent_rationale
+            FROM theme_works
+            WHERE work_id = ?
+            """,
             (from_work_id,),
         ).fetchall()
         for row in theme_rows:
@@ -573,6 +594,10 @@ class StorageService:
                 row["theme_id"],
                 to_work_id,
                 row["rank_order"],
+                composite_score=row["composite_score"],
+                agent_score=row["agent_score"],
+                agent_rank=row["agent_rank"],
+                agent_rationale=row["agent_rationale"],
                 conn=conn,
             )
             conn.execute(
@@ -849,7 +874,13 @@ class StorageService:
         try:
             rows = conn.execute(
                 """
-                SELECT w.* FROM works w
+                SELECT
+                    w.*,
+                    tw.composite_score AS theme_composite_score,
+                    tw.agent_score AS theme_agent_score,
+                    tw.agent_rank AS theme_agent_rank,
+                    tw.agent_rationale AS theme_agent_rationale
+                FROM works w
                 JOIN theme_works tw ON w.id = tw.work_id
                 WHERE tw.theme_id = ?
                 ORDER BY tw.rank_order
@@ -857,7 +888,19 @@ class StorageService:
                 """,
                 (theme_id, limit, offset),
             ).fetchall()
-            return [self._row_to_work(row) for row in rows]
+            works: list[Work] = []
+            for row in rows:
+                work = self._row_to_work(row)
+                if row["theme_composite_score"] is not None:
+                    work.composite_score = row["theme_composite_score"]
+                if row["theme_agent_score"] is not None:
+                    work.agent_score = row["theme_agent_score"]
+                if row["theme_agent_rank"] is not None:
+                    work.agent_rank = row["theme_agent_rank"]
+                if row["theme_agent_rationale"]:
+                    work.agent_rationale = row["theme_agent_rationale"]
+                works.append(work)
+            return works
         finally:
             conn.close()
 
@@ -877,8 +920,17 @@ class StorageService:
             saved_works = [self.save_work(work, conn=conn) for work in works]
             conn.execute("DELETE FROM theme_works WHERE theme_id = ?", (theme_id,))
             for rank_order, work in enumerate(saved_works, start=1):
-                self.link_theme_work(theme_id, work.id, rank_order, conn=conn)
-            return saved_works
+                self.link_theme_work(
+                    theme_id,
+                    work.id,
+                    rank_order,
+                    composite_score=work.composite_score,
+                    agent_score=work.agent_score,
+                    agent_rank=work.agent_rank,
+                    agent_rationale=work.agent_rationale,
+                    conn=conn,
+                )
+        return self.list_works_by_theme(theme_id, limit=len(saved_works))
 
     # ------------------------------------------------------------------
     # Artifact CRUD
@@ -1168,27 +1220,70 @@ class StorageService:
         theme_id: str,
         work_id: str,
         rank_order: int,
+        *,
+        composite_score: float | None = None,
+        agent_score: float | None = None,
+        agent_rank: int | None = None,
+        agent_rationale: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
         if conn is None:
             with self.transaction() as tx:
-                self.link_theme_work(theme_id, work_id, rank_order, conn=tx)
+                self.link_theme_work(
+                    theme_id,
+                    work_id,
+                    rank_order,
+                    composite_score=composite_score,
+                    agent_score=agent_score,
+                    agent_rank=agent_rank,
+                    agent_rationale=agent_rationale,
+                    conn=tx,
+                )
                 return
 
         conn.execute(
             """
-            INSERT INTO theme_works (theme_id, work_id, rank_order)
-            VALUES (?, ?, ?)
+            INSERT INTO theme_works (
+                theme_id, work_id, rank_order, composite_score, agent_score, agent_rank, agent_rationale
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(theme_id, work_id) DO UPDATE SET
                 rank_order = CASE
                     WHEN theme_works.rank_order IS NULL THEN excluded.rank_order
                     WHEN excluded.rank_order IS NULL THEN theme_works.rank_order
                     WHEN excluded.rank_order < theme_works.rank_order THEN excluded.rank_order
                     ELSE theme_works.rank_order
-                END
+                END,
+                composite_score = COALESCE(excluded.composite_score, theme_works.composite_score),
+                agent_score = COALESCE(excluded.agent_score, theme_works.agent_score),
+                agent_rank = COALESCE(excluded.agent_rank, theme_works.agent_rank),
+                agent_rationale = COALESCE(excluded.agent_rationale, theme_works.agent_rationale)
             """,
-            (theme_id, work_id, rank_order),
+            (
+                theme_id,
+                work_id,
+                rank_order,
+                composite_score,
+                agent_score,
+                agent_rank,
+                agent_rationale,
+            ),
         )
+
+    def get_theme_work_context(self, theme_id: str, work_id: str) -> dict[str, object] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT rank_order, composite_score, agent_score, agent_rank, agent_rationale
+                FROM theme_works
+                WHERE theme_id = ? AND work_id = ?
+                """,
+                (theme_id, work_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Repair / migration helpers

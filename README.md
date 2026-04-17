@@ -2,21 +2,24 @@
 
 **English** | [中文](README_CN.md)
 
-> Theme-guided scholarly retrieval, cached evidence access, and explicit full-text acquisition
+> Clean LAN-served scholarly MCP for ChatBox, with honest full-text status and only two public tools.
 
 ## Overview
 
-ScholarTrace turns a research brief into ranked papers, cached evidence, and exportable reports.
+ScholarTrace takes a theme document, retrieves papers from multiple scholarly sources, reranks them, and lets the MCP client read deeper only when needed.
 
-- **Unified retrieval**: 6 core scholarly sources by default: OpenAlex, arXiv, Semantic Scholar, DBLP, OpenReview, and Crossref.
-- **DeepXiv joins unified retrieval when configured**: if `SCHOLARTRACE_DEEPXIV_TOKENS` is set, or explicit auto-register is enabled with `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET`, DeepXiv becomes a normal retrieval source in the same fan-out, dedup, ranking, and storage path.
-- **One ranking path**: all candidates go through the same deduplication, provenance merge, and composite ranking logic. DeepXiv is not a side ranking system.
-- **Cache-first full-text model**: `GET /papers/{paper_id}/fulltext` and `get_paper_fulltext` only read cached state. Missing full text is fetched only through the explicit acquire path.
-- **Direct DeepXiv evidence access**: dedicated DeepXiv REST endpoints and MCP tools still exist, but they are direct DeepXiv reads, not ScholarTrace cache reads.
-- **LLM-facing interfaces**: REST API plus a 13-tool MCP server. MCP defaults to local `stdio`. SSE is optional and token-gated.
-- **BigModel GLM example**: `examples/glm_scholar_search.py` uses `glm-5-turbo` by default and keeps every single request under the model context window with bounded prompt packing.
+- **2 public MCP tools**: `query` and `read`
+- **Main deployment mode**: SSE over LAN for shared team use in ChatBox
+- **Default rerank model**: `glm-5-turbo`
+- **Default second-stage pool**: `agent_candidate_limit=100`
+- **Default final output**: `final_limit=20`
+- **Current local validation still collects 182 tests**
 
-## Quick Start
+REST stays broad for now. This pass simplifies the MCP product surface only.
+
+## LAN SSE Quick Start
+
+This is the main deployment story.
 
 ```bash
 conda create -n ScholarTrace python=3.13 -y
@@ -28,85 +31,180 @@ python -m pip install -r requirements-dev.txt
 scholartrace-check-env --include-dev --pytest-collect
 pytest tests/ -q
 
-cp .env.example .env
-# Edit .env for your local machine
-
-scholartrace-api
-# -> http://127.0.0.1:9000
+export SCHOLARTRACE_MCP_TRANSPORT=sse
+export SCHOLARTRACE_MCP_HOST=0.0.0.0
+export SCHOLARTRACE_MCP_PORT=8001
+export SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
+export SCHOLARTRACE_ACCESS_TOKEN=g203-mcp
+export SCHOLARTRACE_BIGMODEL_API_KEY=<your-bigmodel-key>
 
 scholartrace-mcp
-# -> local stdio MCP server
 ```
 
-Current local validation collects **182 tests**.
+Use this URL from a client on the same LAN:
 
-## Configuration
+- `http://<server-lan-ip>:8001/sse`
 
-All runtime settings use the `SCHOLARTRACE_` prefix. Use `.env` only for local development. For a deployed service, keep secrets outside the repo tree.
+The token is user-defined. It is not auto-generated.
 
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `SCHOLARTRACE_API_HOST` | No | `127.0.0.1` | REST bind host |
-| `SCHOLARTRACE_API_PORT` | No | `9000` | REST bind port |
-| `SCHOLARTRACE_MCP_HOST` | No | `127.0.0.1` | MCP SSE bind host |
-| `SCHOLARTRACE_MCP_PORT` | No | `8001` | MCP SSE bind port |
-| `SCHOLARTRACE_MCP_TRANSPORT` | No | `stdio` | MCP transport: `stdio` or `sse` |
-| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | No | `false` | Required before non-loopback REST or MCP SSE |
-| `SCHOLARTRACE_ACCESS_TOKEN` | Remote only | | Shared bearer token for REST and MCP SSE |
-| `SCHOLARTRACE_SEMANTIC_SCHOLAR_API_KEY` | No | | Optional higher Semantic Scholar rate limits |
-| `SCHOLARTRACE_OPENALEX_MAILTO` | No | | OpenAlex polite-pool email |
-| `SCHOLARTRACE_CROSSREF_MAILTO` | No | | Crossref polite-pool email |
-| `SCHOLARTRACE_MAX_RESULTS_PER_SOURCE_PER_QUERY` | No | `200` | Per-source retrieval cap |
-| `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | No | `500` | Target merged candidate pool |
-| `SCHOLARTRACE_MAX_FULLTEXT_DOWNLOADS` | No | `50` | Retrieval-time full-text cap |
-| `SCHOLARTRACE_BIGMODEL_API_KEY` | Example only | | BigModel key for the GLM example and DeepXiv agent filtering |
-| `SCHOLARTRACE_BIGMODEL_BASE_URL` | No | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` | BigModel endpoint |
-| `SCHOLARTRACE_BIGMODEL_MODEL` | No | `glm-5-turbo` | Default GLM model |
-| `SCHOLARTRACE_DEEPXIV_TOKENS` | DeepXiv only | | Comma-separated DeepXiv tokens |
-| `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER` | No | `false` | Explicit opt-in auto-register |
-| `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` | Auto-register only | | SDK secret used only when auto-register is enabled |
+The MCP client must send:
 
-## Runtime Model
+- `Authorization: Bearer g203-mcp`
 
-### Unified retrieval and DeepXiv
+## ChatBox JSON
 
-Theme retrieval has one main path:
+Paste or import this in ChatBox:
 
-1. parse the theme document into queries
-2. fan out each query across the configured connectors
-3. merge duplicate papers by stable identifiers and fuzzy title match
-4. rank the merged papers
-5. persist canonical works, links, artifacts, and sections
+```json
+{
+  "name": "ScholarTrace LAN",
+  "type": "sse",
+  "url": "http://<server-lan-ip>:8001/sse",
+  "headers": {
+    "Authorization": "Bearer g203-mcp"
+  }
+}
+```
 
-DeepXiv is part of that path when configured. If it is not configured, ScholarTrace keeps the 6-source flow and skips DeepXiv cleanly.
+## Public MCP Surface
 
-### Cached reads vs explicit acquire
+ScholarTrace now exposes only two public MCP tools.
 
-ScholarTrace now uses one clear full-text model:
+### `query`
 
-1. **Read cached state** with `GET /papers/{paper_id}/fulltext` or `get_paper_fulltext`
-2. **Acquire missing full text explicitly** with `POST /papers/{paper_id}/fulltext/acquire` or `acquire_paper_fulltext`
-3. **Read cached state again** with `GET /papers/{paper_id}/fulltext` or `get_paper_fulltext`
+Suggested call:
 
-Important details:
+```json
+{
+  "theme_document": "your theme document text",
+  "final_limit": 20,
+  "agent_candidate_limit": 100,
+  "coarse_pool_limit": 500,
+  "include_rationale": true
+}
+```
 
-- cache-only reads do not perform network fetches
-- explicit acquire is the only path that can trigger network work
-- public-source acquisition is tried first
-- for arXiv papers, DeepXiv markdown can be used as a later fallback during explicit acquire when DeepXiv is configured
-- expensive operations are budgeted and rate-limited; cache reads are cheap
+What `query` does by default:
 
-### Direct DeepXiv reads
+1. Parse the theme document
+2. Run unified retrieval across the configured scholarly sources
+3. Deduplicate the raw candidates
+4. Run first-stage composite ranking
+5. Keep a coarse candidate pool
+6. Run the built-in DeepXiv Agent second-stage rerank with `glm-5-turbo`
+7. Return the final selected papers
 
-The dedicated DeepXiv REST endpoints and MCP tools are still useful, but they are different from ScholarTrace cache reads:
+Important notes:
 
-- `GET /deepxiv/papers/{arxiv_id}/fulltext` and `deepxiv_paper_fulltext` return direct DeepXiv markdown
-- they do not replace `GET /papers/{paper_id}/fulltext`
-- they are best used for direct arXiv evidence access, summaries, sections, and agent-assisted filtering
+- DeepXiv still joins unified retrieval as a source when it is configured
+- The DeepXiv Agent is no longer a separate MCP step in the normal user flow
+- If `final_limit` is not given, `query` returns 20 papers by default
+- If the client asks for more, ScholarTrace returns that many when possible
+- `agent_candidate_limit` defaults to 100
+- `coarse_pool_limit` is optional
+
+The `query` response includes:
+
+- `theme_id`
+- `total_retrieved`
+- `total_after_dedup`
+- `total_after_first_stage`
+- `total_agent_candidates`
+- `total_final`
+- `papers`
+
+Each paper summary includes:
+
+- `paper_id`
+- `title`
+- `authors`
+- `year`
+- `venue`
+- `abstract`
+- `composite_score`
+- `agent_score`
+- `agent_rank`
+- `rationale`
+- `fulltext_status`
+
+### `read`
+
+`read` is the single layered access tool.
+
+Supported depths:
+
+- `summary`
+- `sections`
+- `fulltext_status`
+- `fulltext`
+- `direct_evidence`
+
+Normal MCP flow:
+
+1. Call `query`
+2. Pick a paper from the returned list
+3. Call `read`
+4. If `fulltext_status` shows the paper is not cached, call `read` again with `allow_acquire=true`
+
+Example:
+
+```json
+{
+  "paper_id": "paper-id-from-query",
+  "depth": "fulltext",
+  "allow_acquire": true
+}
+```
+
+What each depth means:
+
+- `summary`: metadata, abstract, ranking state, agent state, and compact full-text status
+- `sections`: cached sections only
+- `fulltext_status`: the honest cache and acquisition state
+- `fulltext`: cached parsed text when present; if missing and `allow_acquire=true`, ScholarTrace attempts explicit acquisition and returns the resulting state
+- `direct_evidence`: direct DeepXiv metadata and brief for arXiv-backed papers, still under the same `read` tool
+
+## Full-Text Honesty
+
+ScholarTrace does have a real explicit acquire path. It is not an empty shell.
+
+Today the explicit acquire path really tries, in this order:
+
+1. arXiv HTML
+2. arXiv PDF
+3. metadata `pdf_url`
+4. metadata `oa_url` or `html_url`
+5. DeepXiv markdown fallback for arXiv-backed papers when DeepXiv is configured
+
+What is confirmed working today:
+
+- arXiv HTML fetch with heading-based section parsing
+- arXiv PDF fetch with plain-text extraction
+- metadata PDF and HTML fetch
+- DeepXiv markdown fallback with heading-based section parsing
+- explicit negative-cache states when acquisition fails
+
+What is still limited:
+
+- New-paper full-text retrieval is not guaranteed
+- PDF parsing is mostly plain-text extraction, not strong section recovery
+- No OCR for scanned or image-only PDFs
+- HTML parsing is a simple heading-based split
+- markdown fallback parsing is a simple heading-based split
+- retrieval does not auto-download full text during search
+
+This is why `read` is honest:
+
+- if full text is cached, it returns it
+- if only sections are cached, it returns sections
+- if only abstract and metadata are available, it says so
+- if explicit acquisition fails, it says so clearly
 
 ## REST API
 
-### Core REST endpoints
+REST stays broad in this round.
+
+Core REST endpoints:
 
 ```text
 GET  /health
@@ -121,148 +219,50 @@ POST /papers/{paper_id}/fulltext/acquire
 GET  /themes/{theme_id}/export
 ```
 
-### Direct DeepXiv REST endpoints
+The explicit full-text REST flow is still:
 
-```text
-POST /deepxiv/search
-GET  /deepxiv/papers/{arxiv_id}/summary
-GET  /deepxiv/papers/{arxiv_id}/fulltext
-GET  /deepxiv/papers/{arxiv_id}/sections/{section_name}
-POST /deepxiv/agent/filter
-```
+1. `GET /papers/{paper_id}/fulltext`
+2. `POST /papers/{paper_id}/fulltext/acquire`
+3. `GET /papers/{paper_id}/fulltext`
 
-### End-to-end REST workflow
+## Config Notes
 
-This is the normal REST flow for a client or script:
+Key runtime settings:
 
-```bash
-# 1. Create a theme
-curl -s -X POST http://127.0.0.1:9000/themes \
-  -F 'text=RLHF sycophancy and affective hallucination in language models'
-
-# 2. Launch retrieval
-curl -s -X POST http://127.0.0.1:9000/retrieval/jobs \
-  -F 'theme_id=<theme-id>'
-
-# 3. Poll the job
-curl -s http://127.0.0.1:9000/retrieval/jobs/<job-id>
-
-# 4. Get ranked papers
-curl -s 'http://127.0.0.1:9000/themes/<theme-id>/papers?limit=20'
-
-# 5. Read cached full-text state
-curl -s http://127.0.0.1:9000/papers/<paper-id>/fulltext
-
-# 6. Explicitly acquire missing full text when needed
-curl -s -X POST http://127.0.0.1:9000/papers/<paper-id>/fulltext/acquire
-
-# 7. Re-read the cached state
-curl -s http://127.0.0.1:9000/papers/<paper-id>/fulltext
-```
-
-The full-text payload tells you whether the paper is already cached, whether it still needs acquisition, and whether the last attempt ended in a negative cache window.
-
-## MCP Server
-
-ScholarTrace exposes **13 tools** over MCP. Local `stdio` is the default. SSE is available only when you opt in and provide an access token.
-
-| # | Tool | Purpose |
+| Variable | Default | Purpose |
 |---|---|---|
-| 1 | `search_papers_by_theme` | Parse a theme document, run unified retrieval, rank results, and return top papers |
-| 2 | `get_ranked_papers` | Read ranked papers for a stored theme |
-| 3 | `get_paper_metadata` | Read redacted public metadata for one paper |
-| 4 | `get_paper_sections` | Read cached section content |
-| 5 | `get_paper_fulltext` | Read cached full-text state only |
-| 6 | `acquire_paper_fulltext` | Explicitly acquire full text, then return the refreshed cached state |
-| 7 | `get_related_papers` | Read nearby papers by venue and year |
-| 8 | `export_theme_report` | Export a JSON or Markdown report |
-| 9 | `deepxiv_search` | Search arXiv through DeepXiv |
-| 10 | `deepxiv_paper_summary` | Read direct DeepXiv metadata and TLDR |
-| 11 | `deepxiv_paper_fulltext` | Read direct DeepXiv markdown full text |
-| 12 | `deepxiv_paper_section` | Read one direct DeepXiv section |
-| 13 | `deepxiv_agent_filter` | Search with DeepXiv, then filter with the GLM agent |
+| `SCHOLARTRACE_MCP_TRANSPORT` | `stdio` | Use `sse` for LAN serving |
+| `SCHOLARTRACE_MCP_HOST` | `127.0.0.1` | Set `0.0.0.0` for LAN serving |
+| `SCHOLARTRACE_MCP_PORT` | `8001` | MCP SSE port |
+| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | `false` | Must be `true` for non-loopback SSE |
+| `SCHOLARTRACE_ACCESS_TOKEN` | | Shared bearer token for network MCP |
+| `SCHOLARTRACE_BIGMODEL_API_KEY` | | Required for the built-in query rerank |
+| `SCHOLARTRACE_BIGMODEL_MODEL` | `glm-5-turbo` | Default rerank model |
+| `SCHOLARTRACE_AGENT_CANDIDATE_LIMIT` | `100` | Default second-stage candidate count |
+| `SCHOLARTRACE_FINAL_LIMIT` | `20` | Default final result count |
+| `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | `500` | Default coarse pool before rerank |
 
-### Local `stdio` and optional SSE
+## `stdio` Debug Mode
 
-Recommended local mode:
+`stdio` is still available, but only as a local debugging or development mode.
 
 ```bash
-scholartrace-mcp
+SCHOLARTRACE_MCP_TRANSPORT=stdio scholartrace-mcp
 ```
 
-Optional network mode:
+Do not treat `stdio` as the main team deployment story. The main story is LAN SSE.
 
-```bash
-SCHOLARTRACE_MCP_TRANSPORT=sse \
-SCHOLARTRACE_MCP_HOST=0.0.0.0 \
-SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true \
-SCHOLARTRACE_ACCESS_TOKEN=change-me \
-scholartrace-mcp
-```
+## Example systemd Service
 
-Use SSE only when you really need a network endpoint. Remote startup is rejected unless remote access is explicitly enabled and a token is present.
+The repository includes `scripts/scholartrace-mcp.service` as an SSE-first example.
 
-### ChatBox-style MCP workflow
+The key values are:
 
-For ChatBox or any other MCP client, the normal flow is:
-
-1. call `search_papers_by_theme` with the full research brief
-2. call `get_ranked_papers` for the returned `theme_id`
-3. call `get_paper_fulltext` for a chosen paper to inspect cached state
-4. if `needs_acquisition` is `true`, call `acquire_paper_fulltext`
-5. call `get_paper_fulltext` again to read the updated cache
-
-That is the main MCP story. Use the dedicated DeepXiv tools only when you want direct DeepXiv search, summary, markdown full text, or section access.
-
-## Example Script
-
-`examples/glm_scholar_search.py` follows the same model as the API:
-
-1. create a theme
-2. launch unified retrieval
-3. read ranked papers
-4. read cached full-text state
-5. explicitly acquire missing full text
-6. re-read cached state
-7. summarize papers with BigModel GLM
-
-Notes:
-
-- the default model stays `glm-5-turbo`
-- `SCHOLARTRACE_BIGMODEL_API_KEY` is required
-- no repository fallback key is used
-- prompt construction is bounded per request, not globally capped
-- the script trims message history and packs paper batches so one call stays inside the model context window
-
-Interactive commands in the example:
-
-- `papers` shows the current ranked list
-- `fulltext N` reads cached state for paper `N`
-- `acquire N` explicitly acquires full text for paper `N`, then re-reads the cache
-- `chat` opens the bounded interactive GLM loop
-
-## Architecture Snapshot
-
-```text
-theme document
-    -> parsed queries
-    -> unified fan-out across configured sources
-    -> dedup + provenance merge
-    -> composite ranking
-    -> canonical storage
-    -> cached sections / cached full-text state
-
-default sources:
-    OpenAlex, arXiv, Semantic Scholar, DBLP, OpenReview, Crossref
-
-optional configured source:
-    DeepXiv
-
-explicit evidence path:
-    cache read
-    -> explicit acquire
-    -> cache re-read
-```
+- `SCHOLARTRACE_MCP_TRANSPORT=sse`
+- `SCHOLARTRACE_MCP_HOST=0.0.0.0`
+- `SCHOLARTRACE_MCP_PORT=8001`
+- `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true`
+- `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`
 
 ## Validation
 

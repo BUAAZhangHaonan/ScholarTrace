@@ -9,7 +9,10 @@ Group=scholartrace
 WorkingDirectory=/opt/ScholarTrace
 EnvironmentFile=/etc/scholartrace/scholartrace.env
 Environment=SCHOLARTRACE_MCP_TRANSPORT=sse
-Environment=SCHOLARTRACE_MCP_HOST=127.0.0.1
+Environment=SCHOLARTRACE_MCP_HOST=0.0.0.0
+Environment=SCHOLARTRACE_MCP_PORT=8001
+Environment=SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
+Environment=SCHOLARTRACE_ACCESS_TOKEN=g203-mcp
 Environment=SCHOLARTRACE_DATA_DIR=/var/lib/scholartrace
 Environment=SCHOLARTRACE_DB_PATH=/var/lib/scholartrace/scholartrace.db
 ExecStart=/opt/miniconda3/envs/ScholarTrace/bin/scholartrace-mcp

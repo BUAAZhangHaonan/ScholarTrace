@@ -28,13 +28,20 @@ def test_readmes_document_explicit_acquire_and_mcp_workflow():
         "GET /papers/{paper_id}/fulltext",
     ]
     mcp_flow = [
-        "search_papers_by_theme",
-        "get_ranked_papers",
-        "get_paper_fulltext",
-        "acquire_paper_fulltext",
-        "get_paper_fulltext",
+        "query",
+        "read",
+        "allow_acquire",
     ]
-    required_terms = ["stdio", "SSE", "glm-5-turbo"]
+    required_terms = [
+        "SSE",
+        "stdio",
+        "glm-5-turbo",
+        "SCHOLARTRACE_ACCESS_TOKEN=g203-mcp",
+        "Authorization: Bearer g203-mcp",
+        "http://<server-lan-ip>:8001/sse",
+        "agent_candidate_limit",
+        "final_limit",
+    ]
 
     for readme_name in ("README.md", "README_CN.md"):
         text = _readme_text(readme_name)
@@ -48,30 +55,31 @@ def test_readmes_align_on_core_runtime_story():
     english = _readme_text("README.md")
     chinese = _readme_text("README_CN.md")
 
-    assert "13 tools" in english
-    assert "13 个工具" in chinese
+    assert "2 public MCP tools" in english
+    assert "2 个公开 MCP 工具" in chinese
     assert "182 tests" in english
     assert "182 个测试" in chinese
 
     aligned_terms = [
-        "search_papers_by_theme",
-        "get_ranked_papers",
-        "get_paper_metadata",
-        "get_paper_sections",
-        "get_paper_fulltext",
-        "acquire_paper_fulltext",
-        "get_related_papers",
-        "export_theme_report",
-        "deepxiv_search",
-        "deepxiv_paper_summary",
-        "deepxiv_paper_fulltext",
-        "deepxiv_paper_section",
-        "deepxiv_agent_filter",
+        "`query`",
+        "`read`",
+        "fulltext_status",
+        "direct_evidence",
+        "ChatBox",
+        "DeepXiv Agent",
+        "arXiv HTML",
+        "arXiv PDF",
+        "pdf_url",
+        "oa_url",
+        "html_url",
+        "markdown fallback",
         "GET /papers/{paper_id}/fulltext",
         "POST /papers/{paper_id}/fulltext/acquire",
-        "GET /deepxiv/papers/{arxiv_id}/fulltext",
+        "Authorization: Bearer g203-mcp",
     ]
 
     for text, name in ((english, "README.md"), (chinese, "README_CN.md")):
         for term in aligned_terms:
             assert term in text, f"{name} must include {term}"
+        assert "13 tools" not in text
+        assert "13 个工具" not in text

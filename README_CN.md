@@ -2,21 +2,24 @@
 
 [English](README.md) | **中文**
 
-> 基于主题文档的学术检索、缓存证据访问与显式全文获取系统
+> 面向 ChatBox 的干净 LAN SSE 学术 MCP，只有两个公开工具，并且对全文状态保持诚实。
 
 ## 概览
 
-ScholarTrace 会把一份研究简报变成排序后的论文、可缓存的证据，以及可导出的报告。
+ScholarTrace 会接收一份主题文档，做多源论文检索和二阶段重排，然后只在需要时让 MCP 客户端继续深读。
 
-- **统一检索**：默认接入 6 个核心学术源：OpenAlex、arXiv、Semantic Scholar、DBLP、OpenReview、Crossref。
-- **DeepXiv 按配置加入统一检索**：只要设置了 `SCHOLARTRACE_DEEPXIV_TOKENS`，或显式开启自动注册并提供 `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET`，DeepXiv 就会作为正常检索源进入同一条 fan-out、去重、排序和存储路径。
-- **只有一条排序路径**：所有候选论文都走同一套去重、来源合并和综合排序逻辑。DeepXiv 不是旁路排序系统。
-- **缓存优先的全文模型**：`GET /papers/{paper_id}/fulltext` 和 `get_paper_fulltext` 只读取缓存状态。缺失全文只能通过显式 acquire 路径获取。
-- **保留直接 DeepXiv 证据访问**：专门的 DeepXiv REST 端点和 MCP 工具仍然存在，但它们是直接读取 DeepXiv，不是 ScholarTrace 的缓存全文读取。
-- **面向 LLM 的接口**：提供 REST API 和 13 个工具的 MCP 服务器。MCP 默认使用本地 `stdio`，SSE 是可选且需要令牌。
-- **BigModel GLM 示例**：`examples/glm_scholar_search.py` 默认使用 `glm-5-turbo`，并且会把每次单独请求都限制在模型上下文窗口之内。
+- **2 个公开 MCP 工具**：`query` 和 `read`
+- **主部署模式**：面向团队共享的 LAN SSE
+- **默认二阶段模型**：`glm-5-turbo`
+- **默认二阶段候选数**：`agent_candidate_limit=100`
+- **默认最终返回数**：`final_limit=20`
+- **当前本地校验仍会收集 182 个测试**
 
-## 快速开始
+这一轮只收敛 MCP 产品表面。REST 现在仍然保持 broad。
+
+## LAN SSE 快速开始
+
+这就是主部署方式。
 
 ```bash
 conda create -n ScholarTrace python=3.13 -y
@@ -28,85 +31,180 @@ python -m pip install -r requirements-dev.txt
 scholartrace-check-env --include-dev --pytest-collect
 pytest tests/ -q
 
-cp .env.example .env
-# 按你的本机环境编辑 .env
-
-scholartrace-api
-# -> http://127.0.0.1:9000
+export SCHOLARTRACE_MCP_TRANSPORT=sse
+export SCHOLARTRACE_MCP_HOST=0.0.0.0
+export SCHOLARTRACE_MCP_PORT=8001
+export SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
+export SCHOLARTRACE_ACCESS_TOKEN=g203-mcp
+export SCHOLARTRACE_BIGMODEL_API_KEY=<your-bigmodel-key>
 
 scholartrace-mcp
-# -> 本地 stdio MCP 服务器
 ```
 
-当前本地校验会收集 **182 个测试**。
+局域网客户端使用这个地址：
 
-## 配置
+- `http://<server-lan-ip>:8001/sse`
 
-所有运行时配置都使用 `SCHOLARTRACE_` 前缀。`.env` 只建议用于本地开发。部署服务时，请把密钥放在仓库外部。
+这个 token 是用户自己定义的，不是自动生成的。
 
-| 变量 | 必需 | 默认值 | 用途 |
-|---|---|---|---|
-| `SCHOLARTRACE_API_HOST` | 否 | `127.0.0.1` | REST 绑定地址 |
-| `SCHOLARTRACE_API_PORT` | 否 | `9000` | REST 端口 |
-| `SCHOLARTRACE_MCP_HOST` | 否 | `127.0.0.1` | MCP SSE 绑定地址 |
-| `SCHOLARTRACE_MCP_PORT` | 否 | `8001` | MCP SSE 端口 |
-| `SCHOLARTRACE_MCP_TRANSPORT` | 否 | `stdio` | MCP 传输方式：`stdio` 或 `sse` |
-| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | 否 | `false` | 非回环地址监听前必须显式开启 |
-| `SCHOLARTRACE_ACCESS_TOKEN` | 远程时必需 | | REST 与 MCP SSE 共用 Bearer Token |
-| `SCHOLARTRACE_SEMANTIC_SCHOLAR_API_KEY` | 否 | | Semantic Scholar 可选高配额密钥 |
-| `SCHOLARTRACE_OPENALEX_MAILTO` | 否 | | OpenAlex polite-pool 邮箱 |
-| `SCHOLARTRACE_CROSSREF_MAILTO` | 否 | | Crossref polite-pool 邮箱 |
-| `SCHOLARTRACE_MAX_RESULTS_PER_SOURCE_PER_QUERY` | 否 | `200` | 每个来源的检索上限 |
-| `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | 否 | `500` | 合并后候选池目标大小 |
-| `SCHOLARTRACE_MAX_FULLTEXT_DOWNLOADS` | 否 | `50` | 每次检索允许的全文下载上限 |
-| `SCHOLARTRACE_BIGMODEL_API_KEY` | 仅示例需要 | | GLM 示例脚本和 DeepXiv Agent 筛选使用的 BigModel 密钥 |
-| `SCHOLARTRACE_BIGMODEL_BASE_URL` | 否 | `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` | BigModel 接口地址 |
-| `SCHOLARTRACE_BIGMODEL_MODEL` | 否 | `glm-5-turbo` | 默认 GLM 模型 |
-| `SCHOLARTRACE_DEEPXIV_TOKENS` | 仅 DeepXiv 需要 | | 逗号分隔的 DeepXiv Token |
-| `SCHOLARTRACE_DEEPXIV_AUTO_REGISTER` | 否 | `false` | 显式开启自动注册 |
-| `SCHOLARTRACE_DEEPXIV_REGISTER_SDK_SECRET` | 仅自动注册时需要 | | 自动注册开启时使用的 SDK Secret |
+MCP 客户端必须发送：
 
-## 运行时模型
+- `Authorization: Bearer g203-mcp`
 
-### 统一检索与 DeepXiv
+## ChatBox JSON
 
-主题检索只有一条主路径：
+把下面这段直接粘贴或导入 ChatBox：
 
-1. 把主题文档解析成查询
-2. 把每个查询 fan-out 到已配置的连接器
-3. 用稳定标识和模糊标题匹配合并重复论文
-4. 对合并后的论文排序
-5. 持久化 canonical work、关联、artifact 和 section
+```json
+{
+  "name": "ScholarTrace LAN",
+  "type": "sse",
+  "url": "http://<server-lan-ip>:8001/sse",
+  "headers": {
+    "Authorization": "Bearer g203-mcp"
+  }
+}
+```
 
-当 DeepXiv 已配置时，它会进入这条主路径。没有配置时，ScholarTrace 会保持原来的 6 源流程，并且干净地跳过 DeepXiv。
+## 公共 MCP 表面
 
-### 缓存读取与显式 acquire
+ScholarTrace 现在只暴露两个公开 MCP 工具。
 
-ScholarTrace 现在只有一种清晰的全文模型：
+### `query`
 
-1. **先读缓存状态**：`GET /papers/{paper_id}/fulltext` 或 `get_paper_fulltext`
-2. **缺失时显式获取**：`POST /papers/{paper_id}/fulltext/acquire` 或 `acquire_paper_fulltext`
-3. **再读一次缓存状态**：`GET /papers/{paper_id}/fulltext` 或 `get_paper_fulltext`
+推荐调用：
+
+```json
+{
+  "theme_document": "你的主题文档文本",
+  "final_limit": 20,
+  "agent_candidate_limit": 100,
+  "coarse_pool_limit": 500,
+  "include_rationale": true
+}
+```
+
+`query` 的默认流程：
+
+1. 解析主题文档
+2. 在已配置学术源上做统一检索
+3. 对原始候选去重
+4. 做第一阶段综合排序
+5. 保留 coarse candidate pool
+6. 用内置 DeepXiv Agent 和 `glm-5-turbo` 做第二阶段重排
+7. 返回最终选中的论文
 
 关键点：
 
-- cache-only 读取不会触发网络获取
-- 只有显式 acquire 才会触发网络工作
-- 会先尝试公开来源的全文路径
-- 对 arXiv 论文，如果 DeepXiv 已配置，显式 acquire 时可以把 DeepXiv markdown 作为后备路径
-- 昂贵操作有预算和限流；缓存读取是轻量操作
+- DeepXiv 仍然会在配置完成后作为统一检索源加入
+- DeepXiv Agent 不再是正常流程里单独手动调用的 MCP 步骤
+- 如果不传 `final_limit`，`query` 默认返回 20 篇
+- 如果客户端要更多结果，ScholarTrace 会在可能时返回更多
+- `agent_candidate_limit` 默认是 100
+- `coarse_pool_limit` 是可选参数
 
-### 直接 DeepXiv 读取
+`query` 的返回会包含：
 
-专门的 DeepXiv REST 端点和 MCP 工具仍然很有用，但它们和 ScholarTrace 缓存读取不是一回事：
+- `theme_id`
+- `total_retrieved`
+- `total_after_dedup`
+- `total_after_first_stage`
+- `total_agent_candidates`
+- `total_final`
+- `papers`
 
-- `GET /deepxiv/papers/{arxiv_id}/fulltext` 和 `deepxiv_paper_fulltext` 返回的是直接 DeepXiv markdown
-- 它们不能替代 `GET /papers/{paper_id}/fulltext`
-- 它们适合做直接 arXiv 证据访问、摘要、章节和 Agent 筛选
+每篇论文摘要至少包含：
+
+- `paper_id`
+- `title`
+- `authors`
+- `year`
+- `venue`
+- `abstract`
+- `composite_score`
+- `agent_score`
+- `agent_rank`
+- `rationale`
+- `fulltext_status`
+
+### `read`
+
+`read` 是唯一的分层读取工具。
+
+支持的深度：
+
+- `summary`
+- `sections`
+- `fulltext_status`
+- `fulltext`
+- `direct_evidence`
+
+标准 MCP 流程：
+
+1. 先调用 `query`
+2. 从返回结果里选一篇论文
+3. 再调用 `read`
+4. 如果 `fulltext_status` 说明全文还没缓存，就再次调用 `read`，并设置 `allow_acquire=true`
+
+例子：
+
+```json
+{
+  "paper_id": "paper-id-from-query",
+  "depth": "fulltext",
+  "allow_acquire": true
+}
+```
+
+每个深度的含义：
+
+- `summary`：元数据、摘要、排序状态、agent 状态、紧凑全文状态
+- `sections`：只返回缓存章节
+- `fulltext_status`：返回真实缓存状态和获取状态
+- `fulltext`：如果有缓存解析文本就返回；如果没有且 `allow_acquire=true`，就触发显式获取并返回结果状态
+- `direct_evidence`：对有 arXiv 背景的论文，返回直接 DeepXiv 元数据和 brief，但仍然留在同一个 `read` 工具里
+
+## 全文能力说明
+
+ScholarTrace 的显式获取路径是真实可用的，不是空壳。
+
+现在显式获取路径按这个顺序尝试：
+
+1. arXiv HTML
+2. arXiv PDF
+3. 元数据里的 `pdf_url`
+4. 元数据里的 `oa_url` 或 `html_url`
+5. 对有 arXiv 背景的论文，在配置好 DeepXiv 时使用 `markdown fallback`
+
+目前确认真实可用的路径：
+
+- `arXiv HTML` 抓取，加上基于标题的章节切分
+- `arXiv PDF` 抓取，加上纯文本提取
+- 元数据 PDF 和 HTML 抓取
+- DeepXiv `markdown fallback`，加上基于标题的章节切分
+- 获取失败时的显式 negative cache 状态
+
+当前仍然存在的限制：
+
+- 新论文全文获取并不保证成功
+- PDF 解析现在主要还是纯文本提取，不是强结构恢复
+- 没有 OCR，扫描版或图片版 PDF 不行
+- HTML 解析是简单的标题切分
+- markdown fallback 解析也是简单的标题切分
+- 检索流程本身不会自动下载全文
+
+这也是为什么 `read` 要保持诚实：
+
+- 有缓存全文就返回
+- 只有章节就返回章节
+- 只有摘要和元数据就明确说明
+- 显式获取失败就清楚说明失败
 
 ## REST API
 
-### 核心 REST 端点
+这一轮 REST 仍然保持 broad。
+
+核心 REST 端点：
 
 ```text
 GET  /health
@@ -121,148 +219,50 @@ POST /papers/{paper_id}/fulltext/acquire
 GET  /themes/{theme_id}/export
 ```
 
-### 直接 DeepXiv REST 端点
+显式全文 REST 流程仍然是：
 
-```text
-POST /deepxiv/search
-GET  /deepxiv/papers/{arxiv_id}/summary
-GET  /deepxiv/papers/{arxiv_id}/fulltext
-GET  /deepxiv/papers/{arxiv_id}/sections/{section_name}
-POST /deepxiv/agent/filter
-```
+1. `GET /papers/{paper_id}/fulltext`
+2. `POST /papers/{paper_id}/fulltext/acquire`
+3. `GET /papers/{paper_id}/fulltext`
 
-### 端到端 REST 工作流
+## 配置说明
 
-客户端或脚本的标准 REST 流程如下：
+关键运行时变量：
 
-```bash
-# 1. 创建主题
-curl -s -X POST http://127.0.0.1:9000/themes \
-  -F 'text=RLHF sycophancy and affective hallucination in language models'
-
-# 2. 启动检索
-curl -s -X POST http://127.0.0.1:9000/retrieval/jobs \
-  -F 'theme_id=<theme-id>'
-
-# 3. 轮询作业状态
-curl -s http://127.0.0.1:9000/retrieval/jobs/<job-id>
-
-# 4. 读取排序后的论文
-curl -s 'http://127.0.0.1:9000/themes/<theme-id>/papers?limit=20'
-
-# 5. 读取缓存全文状态
-curl -s http://127.0.0.1:9000/papers/<paper-id>/fulltext
-
-# 6. 需要时显式获取全文
-curl -s -X POST http://127.0.0.1:9000/papers/<paper-id>/fulltext/acquire
-
-# 7. 再次读取缓存状态
-curl -s http://127.0.0.1:9000/papers/<paper-id>/fulltext
-```
-
-全文返回结果会告诉你论文是否已缓存、是否仍然需要获取，以及上一次失败是否进入了 negative cache 窗口。
-
-## MCP 服务器
-
-ScholarTrace 通过 MCP 暴露 **13 个工具**。本地默认是 `stdio`。只有显式开启并提供访问令牌时，才会启用 SSE。
-
-| # | 工具 | 用途 |
+| 变量 | 默认值 | 用途 |
 |---|---|---|
-| 1 | `search_papers_by_theme` | 解析主题文档，运行统一检索，排序，并返回前几篇论文 |
-| 2 | `get_ranked_papers` | 读取已存储主题的排序论文 |
-| 3 | `get_paper_metadata` | 读取单篇论文的脱敏公开元数据 |
-| 4 | `get_paper_sections` | 读取已缓存的章节内容 |
-| 5 | `get_paper_fulltext` | 只读取缓存全文状态 |
-| 6 | `acquire_paper_fulltext` | 显式获取全文，然后返回刷新后的缓存状态 |
-| 7 | `get_related_papers` | 按期刊和年份读取相关论文 |
-| 8 | `export_theme_report` | 导出 JSON 或 Markdown 报告 |
-| 9 | `deepxiv_search` | 通过 DeepXiv 搜索 arXiv |
-| 10 | `deepxiv_paper_summary` | 读取直接 DeepXiv 元数据和 TLDR |
-| 11 | `deepxiv_paper_fulltext` | 读取直接 DeepXiv markdown 全文 |
-| 12 | `deepxiv_paper_section` | 读取单个直接 DeepXiv 章节 |
-| 13 | `deepxiv_agent_filter` | 先用 DeepXiv 搜索，再用 GLM Agent 做筛选 |
+| `SCHOLARTRACE_MCP_TRANSPORT` | `stdio` | 局域网部署时改成 `sse` |
+| `SCHOLARTRACE_MCP_HOST` | `127.0.0.1` | 局域网部署时改成 `0.0.0.0` |
+| `SCHOLARTRACE_MCP_PORT` | `8001` | MCP SSE 端口 |
+| `SCHOLARTRACE_REMOTE_ACCESS_ENABLED` | `false` | 非回环地址监听时必须设为 `true` |
+| `SCHOLARTRACE_ACCESS_TOKEN` | | 网络 MCP 的共享 bearer token |
+| `SCHOLARTRACE_BIGMODEL_API_KEY` | | 内置 query 重排必需 |
+| `SCHOLARTRACE_BIGMODEL_MODEL` | `glm-5-turbo` | 默认重排模型 |
+| `SCHOLARTRACE_AGENT_CANDIDATE_LIMIT` | `100` | 默认第二阶段候选数 |
+| `SCHOLARTRACE_FINAL_LIMIT` | `20` | 默认最终返回数 |
+| `SCHOLARTRACE_TARGET_CANDIDATE_POOL` | `500` | 重排前默认 coarse pool |
 
-### 本地 `stdio` 与可选 SSE
+## `stdio` 调试模式
 
-推荐的本地模式：
+`stdio` 仍然保留，但只作为本地调试或开发模式。
 
 ```bash
-scholartrace-mcp
+SCHOLARTRACE_MCP_TRANSPORT=stdio scholartrace-mcp
 ```
 
-可选的网络模式：
+不要把 `stdio` 当成团队共享部署的主故事。主故事就是 LAN SSE。
 
-```bash
-SCHOLARTRACE_MCP_TRANSPORT=sse \
-SCHOLARTRACE_MCP_HOST=0.0.0.0 \
-SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true \
-SCHOLARTRACE_ACCESS_TOKEN=change-me \
-scholartrace-mcp
-```
+## systemd 服务示例
 
-只有在你确实需要网络端点时才使用 SSE。没有显式开启远程访问或没有令牌时，远程启动会被拒绝。
+仓库里的 `scripts/scholartrace-mcp.service` 现在是一个 SSE-first 示例。
 
-### ChatBox 风格的 MCP 工作流
+关键值是：
 
-对 ChatBox 或任何其他 MCP 客户端，标准流程都是：
-
-1. 用完整研究简报调用 `search_papers_by_theme`
-2. 用返回的 `theme_id` 调用 `get_ranked_papers`
-3. 对目标论文调用 `get_paper_fulltext`，先检查缓存状态
-4. 如果 `needs_acquisition` 为 `true`，调用 `acquire_paper_fulltext`
-5. 再次调用 `get_paper_fulltext`，读取更新后的缓存
-
-这就是主 MCP 工作流。只有在你明确需要直接 DeepXiv 搜索、摘要、markdown 全文或章节访问时，才使用专门的 DeepXiv 工具。
-
-## 示例脚本
-
-`examples/glm_scholar_search.py` 现在完全跟随 API 的运行模型：
-
-1. 创建主题
-2. 启动统一检索
-3. 读取排序后的论文
-4. 读取缓存全文状态
-5. 显式获取缺失全文
-6. 再次读取缓存状态
-7. 用 BigModel GLM 总结论文
-
-说明：
-
-- 默认模型仍然是 `glm-5-turbo`
-- 必须设置 `SCHOLARTRACE_BIGMODEL_API_KEY`
-- 不再使用仓库内置默认密钥
-- prompt 是按单次请求做边界控制，不是全局硬限制
-- 脚本会裁剪消息历史并打包论文批次，确保一次调用不会超出模型上下文窗口
-
-示例脚本中的交互命令：
-
-- `papers`：显示当前排序列表
-- `fulltext N`：读取第 `N` 篇论文的缓存状态
-- `acquire N`：显式获取第 `N` 篇论文的全文，然后再次读取缓存
-- `chat`：进入带边界控制的 GLM 交互模式
-
-## 架构摘要
-
-```text
-主题文档
-    -> 解析后的查询
-    -> 已配置来源上的统一 fan-out
-    -> 去重 + 来源合并
-    -> 综合排序
-    -> canonical 存储
-    -> 已缓存章节 / 已缓存全文状态
-
-默认来源：
-    OpenAlex、arXiv、Semantic Scholar、DBLP、OpenReview、Crossref
-
-按配置加入的来源：
-    DeepXiv
-
-显式证据路径：
-    先读缓存
-    -> 显式 acquire
-    -> 再读缓存
-```
+- `SCHOLARTRACE_MCP_TRANSPORT=sse`
+- `SCHOLARTRACE_MCP_HOST=0.0.0.0`
+- `SCHOLARTRACE_MCP_PORT=8001`
+- `SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true`
+- `SCHOLARTRACE_ACCESS_TOKEN=g203-mcp`
 
 ## 验证
 

@@ -140,7 +140,7 @@ async def test_query_returns_reranked_papers_with_pipeline_counts():
     assert result["total_agent_candidates"] == 20
     assert result["total_final"] == 3
     assert len(result["papers"]) == 3
-    assert result["papers"][0]["paper_id"] == "paper-0"
+    assert result["papers"][0]["paper_id"] == "theme-1:paper-0"
     assert result["papers"][0]["agent_rank"] == 1
     assert result["papers"][0]["agent_score"] == 9.0
     assert result["papers"][0]["rationale"] == "Reason 0"

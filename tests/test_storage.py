@@ -220,6 +220,57 @@ class TestWorkCRUD:
         assert storage.get_artifacts_by_work(original.id)[0].work_id == original.id
         assert storage.get_sections_by_work(original.id)[0].work_id == original.id
 
+    def test_theme_work_context_keeps_agent_rationale_per_theme(self, storage):
+        theme_a = Theme(id="theme-a", document_text="theme a")
+        theme_b = Theme(id="theme-b", document_text="theme b")
+        storage.save_theme(theme_a)
+        storage.save_theme(theme_b)
+
+        work_a = Work(
+            title="Shared Paper",
+            doi="10.2222/shared-paper",
+            agent_score=9.0,
+            agent_rank=1,
+            agent_rationale="Theme A rationale",
+        )
+        work_b = Work(
+            title="Shared Paper",
+            doi="10.2222/shared-paper",
+            agent_score=7.0,
+            agent_rank=2,
+            agent_rationale="Theme B rationale",
+        )
+
+        saved_a = storage.save_work(work_a)
+        saved_b = storage.save_work(work_b)
+
+        storage.link_theme_work(
+            theme_a.id,
+            saved_a.id,
+            1,
+            composite_score=0.9,
+            agent_score=9.0,
+            agent_rank=1,
+            agent_rationale="Theme A rationale",
+        )
+        storage.link_theme_work(
+            theme_b.id,
+            saved_b.id,
+            1,
+            composite_score=0.7,
+            agent_score=7.0,
+            agent_rank=2,
+            agent_rationale="Theme B rationale",
+        )
+
+        theme_a_works = storage.list_works_by_theme(theme_a.id, limit=10)
+        theme_b_works = storage.list_works_by_theme(theme_b.id, limit=10)
+
+        assert theme_a_works[0].agent_rationale == "Theme A rationale"
+        assert theme_a_works[0].agent_rank == 1
+        assert theme_b_works[0].agent_rationale == "Theme B rationale"
+        assert theme_b_works[0].agent_rank == 2
+
     def test_repair_duplicate_logical_works_rewires_records_and_keeps_best_rank(self, storage):
         conn = storage._get_conn()
         conn.execute("DROP INDEX idx_works_doi")

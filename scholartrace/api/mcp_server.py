@@ -98,14 +98,49 @@ def _fulltext_status_summary(fulltext_payload: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _theme_scoped_paper_id(theme_id: str, work_id: str) -> str:
+    return f"{theme_id}:{work_id}"
+
+
+def _resolve_public_paper_id(storage: StorageService, paper_id: str) -> tuple[str | None, Any | None]:
+    if ":" in paper_id:
+        theme_id, work_id = paper_id.split(":", 1)
+        work = storage.get_work(work_id)
+        return theme_id, work
+    return None, storage.get_work(paper_id)
+
+
+def _apply_theme_context(
+    storage: StorageService,
+    theme_id: str | None,
+    work: Any,
+) -> Any:
+    if theme_id is None:
+        return work
+    context = storage.get_theme_work_context(theme_id, work.id)
+    if context is None:
+        return work
+    themed = work.model_copy(deep=True)
+    if context.get("composite_score") is not None:
+        themed.composite_score = float(context["composite_score"])
+    if context.get("agent_score") is not None:
+        themed.agent_score = float(context["agent_score"])
+    if context.get("agent_rank") is not None:
+        themed.agent_rank = int(context["agent_rank"])
+    if context.get("agent_rationale"):
+        themed.agent_rationale = str(context["agent_rationale"])
+    return themed
+
+
 def _query_paper_payload(
+    theme_id: str,
     work: Any,
     fulltext_payload: dict[str, Any],
     *,
     include_rationale: bool,
 ) -> dict[str, Any]:
     return {
-        "paper_id": work.id,
+        "paper_id": _theme_scoped_paper_id(theme_id, work.id),
         "title": work.title,
         "authors": work.authors,
         "year": work.year,
@@ -119,9 +154,10 @@ def _query_paper_payload(
     }
 
 
-def _summary_payload(work: Any, fulltext_payload: dict[str, Any]) -> dict[str, Any]:
+def _summary_payload(paper_id: str, work: Any, fulltext_payload: dict[str, Any]) -> dict[str, Any]:
     payload = public_work_payload(work)
-    payload["paper_id"] = payload.pop("id")
+    payload["paper_id"] = paper_id
+    payload.pop("id")
     payload["depth"] = "summary"
     payload["rationale"] = payload.pop("agent_rationale")
     payload["fulltext_status"] = _fulltext_status_summary(fulltext_payload)
@@ -157,7 +193,11 @@ async def query(
         storage = _get_storage()
         settings = get_settings()
         from scholartrace.services.fulltext import read_cached_fulltext
-        from scholartrace.services.retrieval import run_query_pipeline
+        from scholartrace.services.retrieval import (
+            QueryPipelineConfigurationError,
+            QueryPipelineRuntimeError,
+            run_query_pipeline,
+        )
 
         try:
             result = await run_query_pipeline(
@@ -169,11 +209,14 @@ async def query(
                 coarse_pool_limit=coarse_pool_limit,
                 include_rationale=include_rationale,
             )
-        except ValueError as exc:
+        except QueryPipelineConfigurationError as exc:
             return tool_error_json("configuration_error", str(exc), retryable=False)
+        except QueryPipelineRuntimeError as exc:
+            return tool_error_json("query_failed", str(exc), retryable=True)
 
         papers = [
             _query_paper_payload(
+                result.theme.id,
                 work,
                 read_cached_fulltext(work, storage, settings),
                 include_rationale=include_rationale,
@@ -203,9 +246,10 @@ async def read(
     """Read a paper through a unified layered interface."""
     storage = _get_storage()
     settings = get_settings()
-    work = storage.get_work(paper_id)
+    theme_id, work = _resolve_public_paper_id(storage, paper_id)
     if work is None:
         return tool_error_json("not_found", f"Paper {paper_id} not found")
+    work = _apply_theme_context(storage, theme_id, work)
 
     from scholartrace.services.fulltext import acquire_fulltext, read_cached_fulltext
 
@@ -227,7 +271,7 @@ async def read(
         if not work.arxiv_id:
             return json.dumps(
                 {
-                    "paper_id": work.id,
+                    "paper_id": paper_id,
                     "depth": depth,
                     "available": False,
                     "source": "deepxiv",
@@ -241,7 +285,7 @@ async def read(
         brief = await connector.get_paper_brief(work.arxiv_id)
         available = metadata is not None or brief is not None
         payload = {
-            "paper_id": work.id,
+            "paper_id": paper_id,
             "depth": depth,
             "available": available,
             "source": "deepxiv",
@@ -257,14 +301,14 @@ async def read(
 
     if depth == "summary":
         return json.dumps(
-            _summary_payload(work, fulltext_payload),
+            _summary_payload(paper_id, work, fulltext_payload),
             ensure_ascii=False,
         )
 
     if depth == "sections":
         return json.dumps(
             {
-                "paper_id": work.id,
+                "paper_id": paper_id,
                 "depth": depth,
                 "sections": fulltext_payload["sections"],
                 "fulltext_status": _fulltext_status_summary(fulltext_payload),
@@ -275,7 +319,7 @@ async def read(
     if depth == "fulltext_status":
         return json.dumps(
             {
-                "paper_id": work.id,
+                "paper_id": paper_id,
                 "depth": depth,
                 "fulltext_status": fulltext_payload,
             },
@@ -294,7 +338,7 @@ async def read(
 
     return json.dumps(
         {
-            "paper_id": work.id,
+            "paper_id": paper_id,
             "depth": depth,
             "fulltext": fulltext_payload.get("parsed_text"),
             "sections": fulltext_payload.get("sections", []),

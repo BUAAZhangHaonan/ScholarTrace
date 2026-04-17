@@ -16,7 +16,7 @@ from scholartrace.connectors.dblp import DblpConnector
 from scholartrace.connectors.openalex import OpenAlexConnector
 from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
-from scholartrace.deepxiv.agent import DeepXivAgent
+from scholartrace.deepxiv.agent import DeepXivAgent, DeepXivAgentError
 from scholartrace.models.schemas import RawCandidate, Theme, Work
 from scholartrace.services.dedup import deduplicate_candidates
 from scholartrace.services.ranking import rank_papers
@@ -35,6 +35,14 @@ class QueryPipelineResult:
     total_agent_candidates: int
     total_final: int
     works: list[Work]
+
+
+class QueryPipelineConfigurationError(ValueError):
+    """Raised when the MCP query pipeline lacks required configuration."""
+
+
+class QueryPipelineRuntimeError(RuntimeError):
+    """Raised when the MCP query pipeline cannot finish honestly."""
 
 
 def _has_usable_deepxiv_tokens(settings: Settings) -> bool:
@@ -190,7 +198,9 @@ async def run_query_pipeline(
 
     resolved = settings or get_settings()
     if not resolved.bigmodel_api_key.strip():
-        raise ValueError("SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking")
+        raise QueryPipelineConfigurationError(
+            "SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking"
+        )
 
     theme = parse_theme(document_text)
     ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
@@ -224,21 +234,27 @@ async def run_query_pipeline(
             ],
             theme.document_text,
         )
+    except DeepXivAgentError as exc:
+        raise QueryPipelineRuntimeError(str(exc)) from exc
     finally:
         await agent.close()
 
-    annotated: list[Work] = []
+    scored: list[Work] = []
+    selected: list[Work] = []
     for rerank in reranked:
         index = rerank.get("index")
         if not isinstance(index, int) or not (0 <= index < len(agent_candidates)):
             continue
-        annotated.append(_annotated_work(agent_candidates[index], rerank))
+        annotated = _annotated_work(agent_candidates[index], rerank)
+        scored.append(annotated)
+        if rerank.get("selected"):
+            selected.append(annotated)
 
-    if not annotated:
-        raise ValueError("Agent reranking returned no scored papers")
+    if not scored:
+        raise QueryPipelineRuntimeError("Agent reranking returned no scored papers")
 
     requested_final = final_limit or resolved.final_limit
-    final_works = annotated[: max(1, requested_final)]
+    final_works = selected[: max(1, requested_final)]
     saved = storage.replace_theme_results(theme.id, final_works)
     logger.info(
         "MCP query pipeline complete: %d final works saved for theme %s",
