@@ -8,6 +8,7 @@ sorted by composite_score descending.
 from __future__ import annotations
 
 import math
+import re
 from typing import Sequence
 
 import numpy as np
@@ -81,8 +82,19 @@ def _relevance_scores(works: Sequence[Work], theme: Theme) -> list[float]:
     if not works:
         return []
 
-    # Theme document: all queries joined
-    theme_doc = " ".join(theme.parsed_queries)
+    # Theme document: prefer structured anchors (topics/methods/datasets),
+    # then fall back to generated queries.
+    anchor_fragments: list[str] = []
+    anchor_fragments.extend(theme.parsed_topics[:12])
+    anchor_fragments.extend(theme.parsed_methods[:8])
+    anchor_fragments.extend(theme.parsed_datasets[:8])
+    if not anchor_fragments:
+        anchor_fragments.extend(theme.parsed_queries[:8])
+
+    anchor_tokens: list[str] = []
+    for fragment in anchor_fragments:
+        anchor_tokens.extend(re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", fragment.lower()))
+    theme_doc = " ".join(anchor_tokens)
 
     # Paper documents: title + " " + abstract
     paper_docs: list[str] = []
@@ -120,10 +132,17 @@ def _relevance_scores(works: Sequence[Work], theme: Theme) -> list[float]:
 
 
 def _recency_score(year: int | None, current_year: int = 2026) -> float:
-    """Exponential decay with ~3 year half-life."""
+    """Exponential decay with ~1.5 year half-life, stronger recency preference.
+
+    Scoring guide (current_year=2026):
+      2026: 1.00   2025: 0.65   2024: 0.42   2023: 0.27
+      2022: 0.18   2021: 0.12   2020: 0.08   older: <0.05
+    """
     if year is None:
         return 0.0
-    return math.exp(-0.23 * (current_year - year))
+    if year > current_year:
+        return 1.0
+    return math.exp(-0.43 * (current_year - year))
 
 
 def _influence_score(

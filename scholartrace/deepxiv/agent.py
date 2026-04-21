@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -15,24 +16,41 @@ from scholartrace.services.ranking import rank_papers
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are a research assistant that filters academic papers for relevance.
-Given a research question and a list of papers with their titles and abstracts,
+_SYSTEM_PROMPT_TEMPLATE = """You are a research assistant that filters academic papers for relevance.
+Given a research question and a list of papers with their titles, abstracts, and publication years,
 you must select the most relevant papers and explain why they matter.
 
+Current date: {current_date}
+Current year: {current_year}
+
 For each paper, assess:
-1. **Relevance** (0-10): How directly does it address the research question?
-2. **Novelty** (0-10): Does it introduce new methods, datasets, or insights?
-3. **Quality** (0-10): Based on venue, methodology soundness, and results.
+1. **Relevance** (0-10): How directly does it address the research question? Be strict — a paper must
+   substantively engage with the core topics of the research question, not merely share a broad field.
+   Papers that only tangentially mention keywords should score <= 3.
+2. **Recency** (0-10): How recent is this paper? Strongly prefer recent work:
+   - Published in {current_year} or same month as current date: 9-10
+   - Published in {current_year_minus_1}: 7-8
+   - Published in {current_year_minus_2}: 5-6
+   - Published in {current_year_minus_3}: 3-4
+   - Older than {current_year_minus_3}: 0-2, unless it is a seminal/highly-cited foundational work
+3. **Novelty** (0-10): Does it introduce new methods, datasets, or insights?
+4. **Quality** (0-10): Based on venue, methodology soundness, and results.
 
 Return your analysis as a JSON array. Each element must have:
 - "index": the paper index (0-based)
 - "selected": true/false
 - "relevance": score 0-10
+- "recency": score 0-10
 - "novelty": score 0-10
 - "quality": score 0-10
 - "reason": one sentence explaining why selected or rejected
 
-Only select papers with relevance >= 5. Max 20 papers can be selected.
+SELECTION RULES:
+- Only select papers with relevance >= 5 AND recency >= 3.
+- EXCEPTION: Older papers (recency < 3) may be selected ONLY if relevance >= 8 AND quality >= 8
+  (i.e., they are foundational/seminal works that are essential to the topic).
+- Max 20 papers can be selected.
+- When deciding between two papers of similar relevance, always prefer the more recent one.
 Return ONLY the JSON array, no other text."""
 _DEFAULT_BATCH_SIZE = 10
 _FALLBACK_BATCH_SIZE = 5
@@ -138,10 +156,12 @@ class DeepXivAgent:
 
         reranked: list[dict[str, Any]] = []
         for result in filter_results:
+            recency = float(result.get("recency", 0) or 0)
             score = (
                 float(result.get("relevance", 0) or 0)
-                + float(result.get("novelty", 0) or 0) * 0.5
-                + float(result.get("quality", 0) or 0) * 0.3
+                + recency * 0.6
+                + float(result.get("novelty", 0) or 0) * 0.3
+                + float(result.get("quality", 0) or 0) * 0.2
             )
             reranked.append(
                 {
@@ -251,6 +271,19 @@ class DeepXivAgent:
             )
         return reranked
 
+    @staticmethod
+    def _build_system_prompt() -> str:
+        """Build the system prompt with the current date injected."""
+        now = datetime.now()
+        current_year = now.year
+        return _SYSTEM_PROMPT_TEMPLATE.format(
+            current_date=now.strftime("%Y-%m-%d"),
+            current_year=current_year,
+            current_year_minus_1=current_year - 1,
+            current_year_minus_2=current_year - 2,
+            current_year_minus_3=current_year - 3,
+        )
+
     async def _call_llm_filter(
         self,
         papers: list[dict[str, Any]],
@@ -258,7 +291,8 @@ class DeepXivAgent:
         *,
         strict: bool,
     ) -> list[dict[str, Any]]:
-        fixed_messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        system_prompt = self._build_system_prompt()
+        fixed_messages = [{"role": "system", "content": system_prompt}]
         question_text = self._prompt_budget.truncate_text(question, 2_000)
 
         merged_results = self._default_filter(len(papers))
@@ -369,10 +403,11 @@ class DeepXivAgent:
         return self._prompt_budget.estimate_messages(messages)
 
     def _request_payload(self, user_msg: str) -> dict[str, Any]:
+        system_prompt = self._build_system_prompt()
         return {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ],
             "thinking": {"type": "enabled"},
@@ -427,8 +462,14 @@ class DeepXivAgent:
 
     def _paper_snippet(self, paper: dict[str, Any]) -> str:
         title = paper.get("title", "Unknown")
+        year = paper.get("year")
+        year_str = f" (Year: {year})" if isinstance(year, int) else " (Year: unknown)"
+        venue = paper.get("venue")
+        venue_str = f" [Venue: {venue}]" if venue else ""
+        citations = paper.get("citation_count")
+        cite_str = f" [Citations: {citations}]" if isinstance(citations, int) and citations > 0 else ""
         abstract = self._prompt_budget.truncate_text(paper.get("abstract") or "", 1_500)
-        return f"{title}\nAbstract: {abstract}"
+        return f"{title}{year_str}{venue_str}{cite_str}\nAbstract: {abstract}"
 
     async def _sleep_before_retry(self, attempt: int, reason: str) -> None:
         backoff = self._retry_backoff_seconds * (2 ** attempt)
@@ -546,6 +587,7 @@ class DeepXivAgent:
                 "index": i,
                 "selected": False,
                 "relevance": 0,
+                "recency": 0,
                 "novelty": 0,
                 "quality": 0,
                 "reason": "Filtering unavailable",

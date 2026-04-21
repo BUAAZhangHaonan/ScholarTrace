@@ -28,8 +28,14 @@ def _work(
     )
 
 
-def _theme(queries: list[str] | None = None) -> Theme:
-    return Theme(parsed_queries=queries or ["machine learning"])
+def _theme(
+    queries: list[str] | None = None,
+    topics: list[str] | None = None,
+) -> Theme:
+    return Theme(
+        parsed_queries=queries or ["machine learning"],
+        parsed_topics=topics or [],
+    )
 
 
 # ── Tests ────────────────────────────────────────────────────────────
@@ -70,8 +76,8 @@ class TestCompositeIsWeightedSum:
     def test_composite_math(self):
         weights = {
             "weight_relevance": 0.35,
-            "weight_recency": 0.20,
-            "weight_influence": 0.20,
+            "weight_recency": 0.30,
+            "weight_influence": 0.10,
             "weight_venue": 0.10,
             "weight_fulltext": 0.10,
             "weight_source_agreement": 0.05,
@@ -113,6 +119,26 @@ class TestRelevanceBoost:
         # The NLP paper should rank first
         assert result[0].title == "Deep Learning for NLP"
         assert result[0].relevance_score > result[1].relevance_score
+
+    def test_topic_anchors_override_noisy_generated_queries(self):
+        works = [
+            _work(
+                title="RLHF Sycophancy in Emotional Support Dialogues",
+                abstract="We evaluate affective hallucination in supportive dialogue.",
+            ),
+            _work(
+                title="Qwen Multimodal Benchmark Survey",
+                abstract="A broad evaluation of multimodal model capabilities.",
+            ),
+        ]
+        result = rank_papers(
+            works,
+            _theme(
+                queries=["model OR qwen OR multimodal benchmark survey"],
+                topics=["rlhf", "sycophancy", "affective hallucination", "emotional support"],
+            ),
+        )
+        assert result[0].title == "RLHF Sycophancy in Emotional Support Dialogues"
 
 
 class TestRecencyBoost:

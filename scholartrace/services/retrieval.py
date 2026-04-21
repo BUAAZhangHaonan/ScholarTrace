@@ -169,14 +169,20 @@ def _fallback_rerank_payload(
     works: list[Work],
     *,
     reason_tag: str,
+    max_select: int = 10,
 ) -> list[dict[str, Any]]:
-    """Build deterministic fallback rerank results from first-stage ranking."""
+    """Build deterministic fallback rerank results from first-stage ranking.
+
+    Only selects the top ``max_select`` papers by first-stage composite score.
+    This prevents returning a flood of irrelevant results when the agent fails.
+    """
     reranked: list[dict[str, Any]] = []
     for index, work in enumerate(works):
+        is_selected = index < max_select
         reranked.append(
             {
                 "index": index,
-                "selected": True,
+                "selected": is_selected,
                 "agent_score": float(work.composite_score),
                 "agent_rank": index + 1,
                 "agent_rationale": f"fallback_default_ranking:{reason_tag}",

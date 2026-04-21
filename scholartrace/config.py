@@ -29,8 +29,8 @@ class Settings(BaseSettings):
 
     # --- Ranking weights ---
     weight_relevance: float = 0.35
-    weight_recency: float = 0.20
-    weight_influence: float = 0.20
+    weight_recency: float = 0.30
+    weight_influence: float = 0.10
     weight_venue: float = 0.10
     weight_fulltext: float = 0.10
     weight_source_agreement: float = 0.05

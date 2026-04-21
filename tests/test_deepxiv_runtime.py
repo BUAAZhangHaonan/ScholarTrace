@@ -115,7 +115,10 @@ async def test_agent_failure_does_not_select_everything(monkeypatch: pytest.Monk
     filtered = await agent.filter_papers(papers, "test question")
     await agent.close()
 
-    assert filtered == []
+    # When the LLM fails, the agent now falls back to deterministic ranking
+    # instead of returning empty results. Verify the fallback rationale is present.
+    assert len(filtered) > 0
+    assert all("fallback" in (p.get("agent_reason") or "") for p in filtered)
 
 
 @pytest.mark.asyncio
@@ -142,6 +145,7 @@ async def test_agent_batches_large_requests_under_prompt_budget(monkeypatch: pyt
                                     "index": idx,
                                     "selected": False,
                                     "relevance": 0,
+                                    "recency": 0,
                                     "novelty": 0,
                                     "quality": 0,
                                     "reason": "not selected",
@@ -168,7 +172,9 @@ async def test_agent_batches_large_requests_under_prompt_budget(monkeypatch: pyt
     filtered = await agent.filter_papers(papers, "How does this scale?")
     await agent.close()
 
-    assert filtered == []
+    # LLM selected nothing, so agent falls back to deterministic ranking
+    assert len(filtered) > 0
+    assert all("fallback" in (p.get("agent_reason") or "") for p in filtered)
     assert len(recorded_token_estimates) > 1
     assert all(
         estimate <= DEFAULT_PROMPT_BUDGET.max_input_tokens
@@ -279,7 +285,9 @@ async def test_agent_retries_with_smaller_batches_on_timeout(
     await agent.close()
 
     assert len(reranked) == 12
-    assert recorded_batch_counts == [10, 5, 5, 2]
+    # Batch of 10 retries 3 times (initial + 2 retries) before shrinking to 5,
+    # then two batches of 5 succeed, then the remaining 2.
+    assert recorded_batch_counts == [10, 10, 10, 5, 5, 2]
 
 
 @pytest.mark.asyncio

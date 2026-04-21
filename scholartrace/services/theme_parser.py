@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from datetime import datetime
 
 from scholartrace.models.schemas import Theme
 
@@ -38,6 +39,46 @@ STOPWORDS = {
     "become", "became", "across", "along", "since", "around", "enough",
     "handle", "handled", "handle", "carry", "carries", "itself", "attention",
     "window", "track", "text", "cards", "card",
+}
+
+# Generic terms that often cause topic drift in long briefs.
+GENERIC_QUERY_TERMS = {
+    "model",
+    "models",
+    "language",
+    "languages",
+    "large",
+    "foundation",
+    "multimodal",
+    "benchmark",
+    "benchmarks",
+    "evaluation",
+    "evaluations",
+    "survey",
+    "surveys",
+    "dataset",
+    "datasets",
+    "hardware",
+    "gpu",
+    "gpus",
+    "qwen",
+    "gpt",
+    "llama",
+    "mistral",
+}
+
+# Only keep method acronyms that are meaningful for retrieval.
+ALLOWED_METHOD_ACRONYMS = {
+    "RLHF",
+    "PPO",
+    "DPO",
+    "GRPO",
+    "SFT",
+    "NLP",
+    "CNN",
+    "RNN",
+    "LSTM",
+    "LLM",
 }
 
 # Known method patterns (lowercase for matching)
@@ -109,7 +150,13 @@ def _extract_key_phrases(text: str, n: int = 20) -> list[str]:
     words = re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", cleaned.lower())
 
     # Filter stopwords and short words
-    filtered = [w for w in words if w not in STOPWORDS and len(w) >= 3]
+    filtered = [
+        w
+        for w in words
+        if w not in STOPWORDS
+        and w not in GENERIC_QUERY_TERMS
+        and len(w) >= 3
+    ]
 
     # Count unigrams
     unigram_counts = Counter(filtered)
@@ -159,6 +206,8 @@ def _extract_methods(text: str) -> list[str]:
     acronyms = re.findall(r"\b([A-Z]{2,6})\b", text)
     seen = set()
     for acr in acronyms:
+        if acr not in ALLOWED_METHOD_ACRONYMS:
+            continue
         lower = acr.lower()
         if lower not in STOPWORDS and acr not in seen:
             seen.add(acr)
@@ -211,6 +260,7 @@ def _generate_queries(
     methods: list[str],
     datasets: list[str],
     full_text: str,
+    focus_terms: list[str] | None = None,
 ) -> list[str]:
     """Generate 6-8 diverse search query formulations."""
     queries: list[str] = []
@@ -223,18 +273,20 @@ def _generate_queries(
             queries.append(q)
 
     # 1. Core topic query: top 2-3 topics joined
-    core_topics = topics[:3]
+    core_topics = (focus_terms or topics)[:3]
     if core_topics:
         _add(" ".join(core_topics))
 
     # 2. Broad recall query: top 5-6 topics OR'd
-    broad_topics = topics[:6]
+    broad_topics = (focus_terms or topics)[:6]
     if broad_topics:
         _add(" OR ".join(broad_topics))
 
-    # 3. Recent trend query: core + year filters
+    # 3. Recent trend query: core + dynamic year filters
     if core_topics:
-        _add(" ".join(core_topics) + " 2024 OR 2025 OR 2026")
+        current_year = datetime.now().year
+        years = " OR ".join(str(y) for y in range(current_year - 1, current_year + 1))
+        _add(" ".join(core_topics) + f" {years}")
 
     # 4. Method query: method names combined
     if methods:
@@ -257,7 +309,13 @@ def _generate_queries(
     # 7. Complementary query: extract less frequent nouns
     cleaned = _clean_text(full_text)
     words = re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", cleaned.lower())
-    filtered = [w for w in words if w not in STOPWORDS and len(w) >= 3]
+    filtered = [
+        w
+        for w in words
+        if w not in STOPWORDS
+        and w not in GENERIC_QUERY_TERMS
+        and len(w) >= 3
+    ]
     word_counts = Counter(filtered)
 
     # Get words NOT in top topics
@@ -266,9 +324,7 @@ def _generate_queries(
         for w in t.split():
             topic_words.add(w.lower())
 
-    complementary = [
-        w for w, _ in word_counts.most_common(30) if w not in topic_words
-    ]
+    complementary = [w for w, _ in word_counts.most_common(30) if w not in topic_words]
     if len(complementary) >= 3:
         _add(" ".join(complementary[:4]))
 
@@ -277,6 +333,59 @@ def _generate_queries(
         _add(f"{datasets[0]} {' '.join(core_topics[:2])}")
 
     return queries
+
+
+def _extract_heading_focus_terms(text: str) -> list[str]:
+    """Extract anchor terms from the first markdown heading when available."""
+    heading = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            heading = re.sub(r"^#{1,6}\s*", "", stripped)
+            break
+
+    if not heading:
+        return []
+
+    # Remove a generic heading prefix such as "Research Brief:".
+    if ":" in heading:
+        heading = heading.split(":", 1)[1]
+
+    normalized = _clean_text(heading)
+    words = re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", normalized.lower())
+    filtered = [
+        w
+        for w in words
+        if w not in STOPWORDS
+        and w not in GENERIC_QUERY_TERMS
+        and len(w) >= 3
+    ]
+
+    if not filtered:
+        return []
+
+    seen = set(filtered)
+    focus_terms: list[str] = []
+
+    if "rlhf" in seen:
+        focus_terms.append("rlhf")
+    if "sycophancy" in seen or "sycophantic" in seen:
+        focus_terms.append("sycophancy")
+    if "affective" in seen and "hallucination" in seen:
+        focus_terms.append("affective hallucination")
+    if "emotional" in seen and "support" in seen:
+        focus_terms.append("emotional support")
+    if "dialogue" in seen or "dialogues" in seen:
+        focus_terms.append("dialogue")
+
+    for token in filtered:
+        normalized_token = "dialogue" if token == "dialogues" else token
+        if normalized_token not in focus_terms:
+            focus_terms.append(normalized_token)
+        if len(focus_terms) >= 8:
+            break
+
+    return focus_terms
 
 
 def parse_theme(document_text: str) -> Theme:
@@ -289,10 +398,22 @@ def parse_theme(document_text: str) -> Theme:
     4. Identify datasets/benchmarks
     5. Generate 6-8 query formulations
     """
+    heading_focus = _extract_heading_focus_terms(document_text)
+
     topics = _extract_key_phrases(document_text, n=20)
+    if heading_focus:
+        topics = heading_focus + [topic for topic in topics if topic not in heading_focus]
+        topics = topics[:20]
+
     methods = _extract_methods(document_text)
     datasets = _extract_datasets(document_text)
-    queries = _generate_queries(topics, methods, datasets, document_text)
+    queries = _generate_queries(
+        topics,
+        methods,
+        datasets,
+        document_text,
+        focus_terms=heading_focus,
+    )
 
     return Theme(
         document_text=document_text,
