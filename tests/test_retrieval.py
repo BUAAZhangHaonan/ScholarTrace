@@ -978,3 +978,104 @@ class TestQueryPipeline:
         assert result.total_agent_candidates == 3
         assert result.total_final == 1
         assert [work.title for work in result.works] == ["Alignment Paper Alpha"]
+
+    def test_run_query_pipeline_falls_back_without_api_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = Theme(
+            id="theme-query-no-key",
+            document_text="query without key",
+            parsed_queries=["query without key"],
+        )
+        settings = Settings(bigmodel_api_key="", final_limit=2, agent_candidate_limit=3)
+
+        cands = [
+            _make_candidate("Fallback Alpha", doi="10.4/a", openalex_id="W30"),
+            _make_candidate("Fallback Beta", doi="10.4/b", openalex_id="W31"),
+            _make_candidate("Fallback Gamma", doi="10.4/c", openalex_id="W32"),
+        ]
+        mock_connectors = [
+            _make_mock_connector("openalex", cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+
+        class _ShouldNotBeCalledAgent:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("DeepXivAgent should not be initialised without API key")
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
+        monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _ShouldNotBeCalledAgent)
+
+        result = _run(run_query_pipeline("query without key", storage, settings=settings))
+
+        assert result.total_agent_candidates == 3
+        assert result.total_final == 2
+        assert len(result.works) == 2
+        assert all(
+            (work.agent_rationale or "").startswith("fallback_default_ranking:missing_api_key")
+            for work in result.works
+        )
+
+    def test_run_query_pipeline_falls_back_when_agent_errors(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        storage = _tmp_storage(tmp_path)
+        theme = Theme(
+            id="theme-query-agent-fail",
+            document_text="query with agent failure",
+            parsed_queries=["query with agent failure"],
+        )
+        settings = Settings(bigmodel_api_key="glm-key", final_limit=2, agent_candidate_limit=3)
+
+        cands = [
+            _make_candidate("AgentFail Alpha", doi="10.5/a", openalex_id="W40"),
+            _make_candidate("AgentFail Beta", doi="10.5/b", openalex_id="W41"),
+            _make_candidate("AgentFail Gamma", doi="10.5/c", openalex_id="W42"),
+        ]
+        mock_connectors = [
+            _make_mock_connector("openalex", cands),
+            _make_mock_connector("arxiv", []),
+            _make_mock_connector("semantic_scholar", []),
+            _make_mock_connector("dblp", []),
+            _make_mock_connector("openreview", []),
+            _make_mock_connector("crossref", []),
+        ]
+
+        import scholartrace.services.retrieval as retrieval_mod
+        from scholartrace.deepxiv.agent import DeepXivAgentError
+
+        class _FailingAgent:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def rerank_papers(self, papers, question):
+                raise DeepXivAgentError("provider temporary failure")
+
+            async def close(self):
+                return None
+
+        monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
+        monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
+        monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _FailingAgent)
+
+        result = _run(run_query_pipeline("query with agent failure", storage, settings=settings))
+
+        assert result.total_agent_candidates == 3
+        assert result.total_final == 2
+        assert len(result.works) == 2
+        assert all(
+            (work.agent_rationale or "").startswith("fallback_default_ranking:agent_failure")
+            for work in result.works
+        )

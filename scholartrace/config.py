@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     bigmodel_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     bigmodel_model: str = "glm-5-turbo"
 
+    # --- DeepXiv agent robustness ---
+    deepxiv_agent_http_timeout_seconds: float = 45.0
+    deepxiv_agent_total_timeout_seconds: float = 120.0
+    deepxiv_agent_max_retries: int = 2
+    deepxiv_agent_retry_backoff_seconds: float = 2.0
+    deepxiv_agent_batch_size: int = 30
+    deepxiv_agent_fallback_top_k: int = 20
+
     # --- Server settings ---
     api_host: str = "127.0.0.1"
     api_port: int = 9000

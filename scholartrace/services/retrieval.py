@@ -165,6 +165,26 @@ def _annotated_work(work: Work, rerank: dict[str, Any]) -> Work:
     return annotated
 
 
+def _fallback_rerank_payload(
+    works: list[Work],
+    *,
+    reason_tag: str,
+) -> list[dict[str, Any]]:
+    """Build deterministic fallback rerank results from first-stage ranking."""
+    reranked: list[dict[str, Any]] = []
+    for index, work in enumerate(works):
+        reranked.append(
+            {
+                "index": index,
+                "selected": True,
+                "agent_score": float(work.composite_score),
+                "agent_rank": index + 1,
+                "agent_rationale": f"fallback_default_ranking:{reason_tag}",
+            }
+        )
+    return reranked
+
+
 async def run_retrieval(
     theme: Theme,
     storage: StorageService,
@@ -197,10 +217,6 @@ async def run_query_pipeline(
     del include_rationale  # payload shaping decides whether rationale is exposed.
 
     resolved = settings or get_settings()
-    if not resolved.bigmodel_api_key.strip():
-        raise QueryPipelineConfigurationError(
-            "SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking"
-        )
 
     theme = parse_theme(document_text)
     ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
@@ -214,46 +230,112 @@ async def run_query_pipeline(
     coarse_pool = ranked[: max(1, coarse_limit)] if ranked else []
     candidate_limit = agent_candidate_limit or resolved.agent_candidate_limit
     agent_candidates = coarse_pool[: max(1, candidate_limit)] if coarse_pool else []
+    requested_final = final_limit or resolved.final_limit
 
-    agent = DeepXivAgent(
-        api_key=resolved.bigmodel_api_key,
-        base_url=resolved.bigmodel_base_url,
-        model=resolved.bigmodel_model,
-    )
-    try:
-        reranked = await agent.rerank_papers(
-            [
-                {
-                    "title": work.title,
-                    "abstract": work.abstract or "",
-                    "authors": work.authors,
-                    "year": work.year,
-                    "venue": work.venue,
-                }
-                for work in agent_candidates
-            ],
-            theme.document_text,
+    if not agent_candidates:
+        saved = storage.replace_theme_results(theme.id, [])
+        return QueryPipelineResult(
+            theme=theme,
+            total_retrieved=total_retrieved,
+            total_after_dedup=total_after_dedup,
+            total_after_first_stage=total_after_first_stage,
+            total_agent_candidates=0,
+            total_final=0,
+            works=saved,
         )
-    except DeepXivAgentError as exc:
-        raise QueryPipelineRuntimeError(str(exc)) from exc
-    finally:
-        await agent.close()
 
-    scored: list[Work] = []
-    selected: list[Work] = []
-    for rerank in reranked:
-        index = rerank.get("index")
-        if not isinstance(index, int) or not (0 <= index < len(agent_candidates)):
-            continue
-        annotated = _annotated_work(agent_candidates[index], rerank)
-        scored.append(annotated)
-        if rerank.get("selected"):
-            selected.append(annotated)
+    reranked: list[dict[str, Any]]
+    if not resolved.bigmodel_api_key.strip():
+        logger.warning(
+            "BigModel API key is not configured, using default ranking fallback for query pipeline"
+        )
+        reranked = _fallback_rerank_payload(
+            agent_candidates,
+            reason_tag="missing_api_key",
+        )
+    else:
+        agent = DeepXivAgent(
+            api_key=resolved.bigmodel_api_key,
+            base_url=resolved.bigmodel_base_url,
+            model=resolved.bigmodel_model,
+            request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
+            total_timeout_seconds=resolved.deepxiv_agent_total_timeout_seconds,
+            max_retries=resolved.deepxiv_agent_max_retries,
+            retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
+            fallback_top_k=resolved.deepxiv_agent_fallback_top_k,
+        )
+        try:
+            reranked = await agent.rerank_papers(
+                [
+                    {
+                        "title": work.title,
+                        "abstract": work.abstract or "",
+                        "authors": work.authors,
+                        "year": work.year,
+                        "venue": work.venue,
+                        "citation_count": work.citation_count,
+                    }
+                    for work in agent_candidates
+                ],
+                theme.document_text,
+            )
+        except DeepXivAgentError as exc:
+            logger.warning(
+                "Agent reranking failed (%s), using default ranking fallback",
+                exc,
+            )
+            reranked = _fallback_rerank_payload(
+                agent_candidates,
+                reason_tag="agent_failure",
+            )
+        except Exception as exc:
+            logger.exception(
+                "Unexpected agent reranking failure, using default ranking fallback: %s",
+                exc,
+            )
+            reranked = _fallback_rerank_payload(
+                agent_candidates,
+                reason_tag="unexpected_agent_failure",
+            )
+        finally:
+            await agent.close()
+
+    if not reranked:
+        logger.warning("Agent reranking returned empty results, using default ranking fallback")
+        reranked = _fallback_rerank_payload(
+            agent_candidates,
+            reason_tag="empty_rerank",
+        )
+
+    def _collect_reranked_works(
+        reranked_items: list[dict[str, Any]],
+    ) -> tuple[list[Work], list[Work]]:
+        scored_works: list[Work] = []
+        selected_works: list[Work] = []
+        for rerank in reranked_items:
+            index = rerank.get("index")
+            if not isinstance(index, int) or not (0 <= index < len(agent_candidates)):
+                continue
+            annotated = _annotated_work(agent_candidates[index], rerank)
+            scored_works.append(annotated)
+            if rerank.get("selected"):
+                selected_works.append(annotated)
+        return scored_works, selected_works
+
+    scored, selected = _collect_reranked_works(reranked)
 
     if not scored:
-        raise QueryPipelineRuntimeError("Agent reranking returned no scored papers")
+        logger.warning("Agent reranking returned no valid indices, using default ranking fallback")
+        fallback_reranked = _fallback_rerank_payload(
+            agent_candidates,
+            reason_tag="invalid_rerank_indices",
+        )
+        scored, selected = _collect_reranked_works(fallback_reranked)
 
-    requested_final = final_limit or resolved.final_limit
+    if not selected:
+        logger.warning("Agent selected no papers, falling back to top first-stage ranked papers")
+        selected = scored[: max(1, requested_final)]
+
     final_works = selected[: max(1, requested_final)]
     saved = storage.replace_theme_results(theme.id, final_works)
     logger.info(

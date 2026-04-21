@@ -334,6 +334,12 @@ def _get_deepxiv_agent_rest() -> Any:
             api_key=s.bigmodel_api_key,
             base_url=s.bigmodel_base_url,
             model=s.bigmodel_model,
+            request_timeout_seconds=s.deepxiv_agent_http_timeout_seconds,
+            total_timeout_seconds=s.deepxiv_agent_total_timeout_seconds,
+            max_retries=s.deepxiv_agent_max_retries,
+            retry_backoff_seconds=s.deepxiv_agent_retry_backoff_seconds,
+            batch_size=s.deepxiv_agent_batch_size,
+            fallback_top_k=s.deepxiv_agent_fallback_top_k,
         )
     return _deepxiv_agent_rest
 

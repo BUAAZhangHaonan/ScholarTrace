@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
 
 import httpx
 
+from scholartrace.models.schemas import Theme, Work
 from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET, PromptBudget
+from scholartrace.services.ranking import rank_papers
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +67,25 @@ class DeepXivAgent:
         model: str = "glm-5-turbo",
         max_fulltext: int = 20,
         prompt_budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
+        request_timeout_seconds: float = 45.0,
+        total_timeout_seconds: float = 120.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 2.0,
+        fallback_top_k: int = 20,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
         self._max_fulltext = max_fulltext
         self._prompt_budget = prompt_budget
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self._request_timeout_seconds = max(1.0, request_timeout_seconds)
+        self._total_timeout_seconds = max(1.0, total_timeout_seconds)
+        self._max_retries = max(0, max_retries)
+        self._retry_backoff_seconds = max(0.1, retry_backoff_seconds)
+        self._fallback_top_k = max(1, fallback_top_k)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self._request_timeout_seconds)
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -86,9 +101,39 @@ class DeepXivAgent:
         if not papers:
             return []
         if not self._api_key:
-            raise DeepXivAgentError("BigModel API key is not configured")
+            if strict:
+                raise DeepXivAgentError("BigModel API key is not configured")
+            logger.warning("BigModel API key is not configured, using fallback ranking")
+            return self._fallback_rerank(papers, question, reason_tag="missing_api_key")
 
-        filter_results = await self._call_llm_filter(papers, question, strict=strict)
+        try:
+            async with asyncio.timeout(self._total_timeout_seconds):
+                filter_results = await self._call_llm_filter(papers, question, strict=strict)
+        except TimeoutError as exc:
+            message = (
+                f"GLM reranking timed out after {self._total_timeout_seconds:.1f}s"
+            )
+            logger.warning(message)
+            if strict:
+                raise DeepXivAgentError(
+                    message,
+                    retry_with_smaller_batch=True,
+                ) from exc
+            return self._fallback_rerank(papers, question, reason_tag="timeout")
+        except DeepXivAgentError as exc:
+            if strict:
+                raise
+            logger.warning("DeepXiv agent reranking failed: %s", exc)
+            return self._fallback_rerank(papers, question, reason_tag="agent_error")
+        except Exception as exc:
+            if strict:
+                raise DeepXivAgentError(
+                    f"GLM reranking failed unexpectedly: {exc}",
+                    retry_with_smaller_batch=False,
+                ) from exc
+            logger.exception("Unexpected DeepXiv reranking failure")
+            return self._fallback_rerank(papers, question, reason_tag="unexpected_error")
+
         reranked: list[dict[str, Any]] = []
         for result in filter_results:
             score = (
@@ -114,6 +159,11 @@ class DeepXivAgent:
         )
         for rank, item in enumerate(reranked, start=1):
             item["agent_rank"] = rank
+
+        if not strict and not any(item.get("selected", False) for item in reranked):
+            logger.warning("Agent selected no papers, using fallback ranking")
+            return self._fallback_rerank(papers, question, reason_tag="no_selected")
+
         return reranked
 
     async def filter_papers(
@@ -125,11 +175,7 @@ class DeepXivAgent:
         if not papers:
             return []
 
-        try:
-            reranked = await self.rerank_papers(papers, question, strict=False)
-        except DeepXivAgentError as exc:
-            logger.error("DeepXiv agent filtering failed: %s", exc)
-            return []
+        reranked = await self.rerank_papers(papers, question, strict=False)
 
         enriched: list[dict[str, Any]] = []
         for item in reranked:
@@ -146,7 +192,62 @@ class DeepXivAgent:
                     "agent_reason": item["agent_rationale"],
                 }
             )
+
+        if not enriched:
+            return []
+
         return enriched[: self._max_fulltext]
+
+    def _fallback_rerank(
+        self,
+        papers: list[dict[str, Any]],
+        question: str,
+        *,
+        reason_tag: str,
+    ) -> list[dict[str, Any]]:
+        """Fallback to deterministic local ranking when GLM is unavailable."""
+        theme = Theme(parsed_queries=[question] if question else [])
+
+        works: list[Work] = []
+        index_by_work_id: dict[str, int] = {}
+        for idx, paper in enumerate(papers):
+            citation_count = paper.get("citation_count", 0)
+            if not isinstance(citation_count, int):
+                citation_count = 0
+            citation_count = max(citation_count, 0)
+
+            year = paper.get("year")
+            if not isinstance(year, int):
+                year = None
+
+            work = Work(
+                title=str(paper.get("title") or ""),
+                abstract=paper.get("abstract") or None,
+                authors=list(paper.get("authors") or []),
+                year=year,
+                venue=paper.get("venue") or None,
+                citation_count=citation_count,
+                source_provenance=["deepxiv"],
+            )
+            works.append(work)
+            index_by_work_id[work.id] = idx
+
+        ranked = rank_papers(works, theme)
+        selected_cap = min(self._fallback_top_k, len(ranked))
+
+        reranked: list[dict[str, Any]] = []
+        for rank, work in enumerate(ranked, start=1):
+            original_index = index_by_work_id[work.id]
+            reranked.append(
+                {
+                    "index": original_index,
+                    "selected": rank <= selected_cap,
+                    "agent_score": round(max(work.composite_score, 0.0) * 10, 4),
+                    "agent_rationale": f"fallback_default_ranking:{reason_tag}",
+                    "agent_rank": rank,
+                }
+            )
+        return reranked
 
     async def _call_llm_filter(
         self,
@@ -327,6 +428,17 @@ class DeepXivAgent:
         abstract = self._prompt_budget.truncate_text(paper.get("abstract") or "", 1_500)
         return f"{title}\nAbstract: {abstract}"
 
+    async def _sleep_before_retry(self, attempt: int, reason: str) -> None:
+        backoff = self._retry_backoff_seconds * (2 ** attempt)
+        logger.warning(
+            "GLM request %s, retrying in %.2fs (attempt %d/%d)",
+            reason,
+            backoff,
+            attempt + 1,
+            self._max_retries,
+        )
+        await asyncio.sleep(backoff)
+
     async def _call_llm_filter_batch(
         self,
         papers: list[dict[str, Any]],
@@ -338,47 +450,69 @@ class DeepXivAgent:
         user_msg = f"Research Question: {question}\n\nPapers:\n{chr(10).join(paper_lines)}"
         payload = self._request_payload(user_msg)
 
-        try:
-            resp = await self._client.post(
-                self._base_url,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-        except httpx.TimeoutException as exc:
-            logger.error("GLM API timeout while reranking batch of %d papers", len(papers))
-            if not strict:
+        content: str | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                resp = await self._client.post(
+                    self._base_url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                break
+            except httpx.TimeoutException as exc:
+                logger.error("GLM API timeout while reranking batch of %d papers", len(papers))
+                if attempt < self._max_retries:
+                    await self._sleep_before_retry(attempt, "timed out")
+                    continue
                 raise DeepXivAgentError(
                     "GLM request timed out while reranking papers",
                     retry_with_smaller_batch=len(papers) > 1,
                 ) from exc
-            raise DeepXivAgentError(
-                "GLM request timed out while reranking papers",
-                retry_with_smaller_batch=len(papers) > 1,
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            error_message, provider_code = self._format_http_error(exc.response)
-            logger.error("GLM API error: %s", error_message)
-            retry_with_smaller_batch = (
-                len(papers) > 1
-                and (
-                    exc.response.status_code == 400
-                    or provider_code == "1261"
+            except httpx.RequestError as exc:
+                logger.error("GLM API request error while reranking batch: %s", exc)
+                if attempt < self._max_retries:
+                    await self._sleep_before_retry(attempt, "failed")
+                    continue
+                raise DeepXivAgentError(
+                    "GLM request failed while reranking papers",
+                    retry_with_smaller_batch=len(papers) > 1,
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                error_message, provider_code = self._format_http_error(exc.response)
+                logger.error("GLM API error: %s", error_message)
+                retryable_status = exc.response.status_code in {429, 500, 502, 503, 504}
+                if retryable_status and attempt < self._max_retries:
+                    await self._sleep_before_retry(attempt, f"returned HTTP {exc.response.status_code}")
+                    continue
+                retry_with_smaller_batch = (
+                    len(papers) > 1
+                    and (
+                        exc.response.status_code == 400
+                        or provider_code == "1261"
+                    )
                 )
-            )
-            raise DeepXivAgentError(
-                error_message,
-                http_status=exc.response.status_code,
-                provider_code=provider_code,
-                retry_with_smaller_batch=retry_with_smaller_batch,
-            ) from exc
-        except (KeyError, IndexError) as exc:
-            logger.error("Invalid GLM response structure: %s", exc)
+                raise DeepXivAgentError(
+                    error_message,
+                    http_status=exc.response.status_code,
+                    provider_code=provider_code,
+                    retry_with_smaller_batch=retry_with_smaller_batch,
+                ) from exc
+            except (KeyError, IndexError) as exc:
+                logger.error("Invalid GLM response structure: %s", exc)
+                if attempt < self._max_retries:
+                    await self._sleep_before_retry(attempt, "returned malformed payload")
+                    continue
+                if not strict:
+                    return self._default_filter(len(papers))
+                raise DeepXivAgentError("GLM response was missing the expected content") from exc
+
+        if content is None:
             if not strict:
                 return self._default_filter(len(papers))
-            raise DeepXivAgentError("GLM response was missing the expected content") from exc
+            raise DeepXivAgentError("GLM response content was empty")
 
         content = content.strip()
         if content.startswith("```"):
