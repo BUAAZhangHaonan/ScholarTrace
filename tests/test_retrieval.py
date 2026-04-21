@@ -18,6 +18,7 @@ from scholartrace.models.schemas import (
     Theme,
 )
 from scholartrace.services.retrieval import (
+    QueryPipelineConfigurationError,
     run_retrieval,
     run_retrieval_for_document,
     run_query_pipeline,
@@ -979,7 +980,7 @@ class TestQueryPipeline:
         assert result.total_final == 1
         assert [work.title for work in result.works] == ["Alignment Paper Alpha"]
 
-    def test_run_query_pipeline_falls_back_without_api_key(
+    def test_run_query_pipeline_requires_api_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1008,23 +1009,14 @@ class TestQueryPipeline:
 
         import scholartrace.services.retrieval as retrieval_mod
 
-        class _ShouldNotBeCalledAgent:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("DeepXivAgent should not be initialised without API key")
-
         monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
         monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
-        monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _ShouldNotBeCalledAgent)
 
-        result = _run(run_query_pipeline("query without key", storage, settings=settings))
-
-        assert result.total_agent_candidates == 3
-        assert result.total_final == 2
-        assert len(result.works) == 2
-        assert all(
-            (work.agent_rationale or "").startswith("fallback_default_ranking:missing_api_key")
-            for work in result.works
-        )
+        with pytest.raises(
+            QueryPipelineConfigurationError,
+            match="SCHOLARTRACE_BIGMODEL_API_KEY is required",
+        ):
+            _run(run_query_pipeline("query without key", storage, settings=settings))
 
     def test_run_query_pipeline_falls_back_when_agent_errors(
         self,

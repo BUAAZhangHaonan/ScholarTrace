@@ -71,6 +71,7 @@ class DeepXivAgent:
         total_timeout_seconds: float = 120.0,
         max_retries: int = 2,
         retry_backoff_seconds: float = 2.0,
+        batch_size: int = _DEFAULT_BATCH_SIZE,
         fallback_top_k: int = 20,
     ):
         self._api_key = api_key
@@ -82,6 +83,7 @@ class DeepXivAgent:
         self._total_timeout_seconds = max(1.0, total_timeout_seconds)
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.1, retry_backoff_seconds)
+        self._batch_size = max(_SINGLE_PAPER_BATCH_SIZE, batch_size)
         self._fallback_top_k = max(1, fallback_top_k)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._request_timeout_seconds)
@@ -261,7 +263,7 @@ class DeepXivAgent:
 
         merged_results = self._default_filter(len(papers))
         start = 0
-        active_batch_limit = _DEFAULT_BATCH_SIZE
+        active_batch_limit = self._batch_size
         while start < len(papers):
             batch_results, consumed, active_batch_limit = await self._run_adaptive_batch(
                 papers,

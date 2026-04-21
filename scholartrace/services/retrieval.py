@@ -217,6 +217,10 @@ async def run_query_pipeline(
     del include_rationale  # payload shaping decides whether rationale is exposed.
 
     resolved = settings or get_settings()
+    if not resolved.bigmodel_api_key.strip():
+        raise QueryPipelineConfigurationError(
+            "SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking"
+        )
 
     theme = parse_theme(document_text)
     ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
@@ -244,61 +248,52 @@ async def run_query_pipeline(
             works=saved,
         )
 
-    reranked: list[dict[str, Any]]
-    if not resolved.bigmodel_api_key.strip():
+    agent = DeepXivAgent(
+        api_key=resolved.bigmodel_api_key,
+        base_url=resolved.bigmodel_base_url,
+        model=resolved.bigmodel_model,
+        request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
+        total_timeout_seconds=resolved.deepxiv_agent_total_timeout_seconds,
+        max_retries=resolved.deepxiv_agent_max_retries,
+        retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
+        batch_size=resolved.deepxiv_agent_batch_size,
+        fallback_top_k=resolved.deepxiv_agent_fallback_top_k,
+    )
+    try:
+        reranked = await agent.rerank_papers(
+            [
+                {
+                    "title": work.title,
+                    "abstract": work.abstract or "",
+                    "authors": work.authors,
+                    "year": work.year,
+                    "venue": work.venue,
+                    "citation_count": work.citation_count,
+                }
+                for work in agent_candidates
+            ],
+            theme.document_text,
+        )
+    except DeepXivAgentError as exc:
         logger.warning(
-            "BigModel API key is not configured, using default ranking fallback for query pipeline"
+            "Agent reranking failed (%s), using default ranking fallback",
+            exc,
         )
         reranked = _fallback_rerank_payload(
             agent_candidates,
-            reason_tag="missing_api_key",
+            reason_tag="agent_failure",
         )
-    else:
-        agent = DeepXivAgent(
-            api_key=resolved.bigmodel_api_key,
-            base_url=resolved.bigmodel_base_url,
-            model=resolved.bigmodel_model,
-            request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
-            total_timeout_seconds=resolved.deepxiv_agent_total_timeout_seconds,
-            max_retries=resolved.deepxiv_agent_max_retries,
-            retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
-            fallback_top_k=resolved.deepxiv_agent_fallback_top_k,
+    except Exception as exc:
+        logger.exception(
+            "Unexpected agent reranking failure, using default ranking fallback: %s",
+            exc,
         )
-        try:
-            reranked = await agent.rerank_papers(
-                [
-                    {
-                        "title": work.title,
-                        "abstract": work.abstract or "",
-                        "authors": work.authors,
-                        "year": work.year,
-                        "venue": work.venue,
-                        "citation_count": work.citation_count,
-                    }
-                    for work in agent_candidates
-                ],
-                theme.document_text,
-            )
-        except DeepXivAgentError as exc:
-            logger.warning(
-                "Agent reranking failed (%s), using default ranking fallback",
-                exc,
-            )
-            reranked = _fallback_rerank_payload(
-                agent_candidates,
-                reason_tag="agent_failure",
-            )
-        except Exception as exc:
-            logger.exception(
-                "Unexpected agent reranking failure, using default ranking fallback: %s",
-                exc,
-            )
-            reranked = _fallback_rerank_payload(
-                agent_candidates,
-                reason_tag="unexpected_agent_failure",
-            )
-        finally:
-            await agent.close()
+        reranked = _fallback_rerank_payload(
+            agent_candidates,
+            reason_tag="unexpected_agent_failure",
+        )
+    finally:
+        await agent.close()
 
     if not reranked:
         logger.warning("Agent reranking returned empty results, using default ranking fallback")
