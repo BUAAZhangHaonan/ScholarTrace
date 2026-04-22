@@ -108,7 +108,7 @@ async def test_query_returns_reranked_papers_with_pipeline_counts():
     ):
         assert doc_text == "Some theme document text"
         assert final_limit == 20
-        assert agent_candidate_limit == 100
+        assert agent_candidate_limit == 150
         assert coarse_pool_limit is None
         assert include_rationale is True
         storage.save_theme(fake_theme)
@@ -194,6 +194,27 @@ async def test_query_passes_explicit_limits_to_pipeline():
     assert result["theme_id"] == "theme-explicit"
     assert result["total_final"] == 0
     assert result["papers"] == []
+
+
+@pytest.mark.asyncio
+async def test_query_returns_query_failed_when_agent_rerank_fails():
+    from scholartrace.api.mcp_server import query
+    from scholartrace.services.retrieval import QueryPipelineRuntimeError
+
+    async def _failing_query_pipeline(*args, **kwargs):
+        raise QueryPipelineRuntimeError("Agent reranking failed: provider timeout")
+
+    with patch(
+        "scholartrace.services.retrieval.run_query_pipeline",
+        new=_failing_query_pipeline,
+        create=True,
+    ):
+        result_str = await query("Some theme document text")
+
+    result = json.loads(result_str)
+    assert result["error"]["code"] == "query_failed"
+    assert result["error"]["retryable"] is True
+    assert "Agent reranking failed" in result["error"]["message"]
 
 
 @pytest.mark.asyncio

@@ -311,6 +311,7 @@ async def test_agent_includes_business_error_code_in_glm_failure(
         await agent.rerank_papers(
             [{"title": "Paper A", "abstract": "A"}],
             "test question",
+            strict=True,
         )
     await agent.close()
 

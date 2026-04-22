@@ -1018,7 +1018,7 @@ class TestQueryPipeline:
         ):
             _run(run_query_pipeline("query without key", storage, settings=settings))
 
-    def test_run_query_pipeline_falls_back_when_agent_errors(
+    def test_run_query_pipeline_degrades_gracefully_when_all_agent_models_fail(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1049,11 +1049,25 @@ class TestQueryPipeline:
         from scholartrace.deepxiv.agent import DeepXivAgentError
 
         class _FailingAgent:
-            def __init__(self, *args, **kwargs):
-                return None
+            """LLM agents fail; deterministic fallback (api_key="") succeeds."""
+
+            def __init__(self, *args, api_key="", **kwargs):
+                self._api_key = api_key
 
             async def rerank_papers(self, papers, question):
-                raise DeepXivAgentError("provider temporary failure")
+                if self._api_key:
+                    raise DeepXivAgentError("provider temporary failure")
+                # Deterministic fallback: select all papers ranked by index
+                return [
+                    {
+                        "index": i,
+                        "selected": True,
+                        "agent_score": float(len(papers) - i),
+                        "agent_rank": i + 1,
+                        "agent_rationale": "Fallback selection.",
+                    }
+                    for i in range(len(papers))
+                ]
 
             async def close(self):
                 return None
@@ -1062,12 +1076,19 @@ class TestQueryPipeline:
         monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
         monkeypatch.setattr(retrieval_mod, "DeepXivAgent", _FailingAgent)
 
-        result = _run(run_query_pipeline("query with agent failure", storage, settings=settings))
-
-        assert result.total_agent_candidates == 3
-        assert result.total_final == 2
-        assert len(result.works) == 2
-        assert all(
-            (work.agent_rationale or "").startswith("fallback_default_ranking:agent_failure")
-            for work in result.works
+        result = _run(
+            run_query_pipeline("query with agent failure", storage, settings=settings)
         )
+
+        # Pipeline should NOT raise — it degrades to deterministic fallback
+        assert result.theme.id == "theme-query-agent-fail"
+        assert result.total_final == 2  # final_limit=2
+        assert len(result.works) == 2
+        # All fallback-selected papers should have agent metadata
+        for work in result.works:
+            assert work.agent_score > 0
+            assert work.agent_rationale == "Fallback selection."
+
+        # Results should be persisted
+        stored = storage.list_works_by_theme(theme.id, limit=10)
+        assert len(stored) == 2

@@ -115,7 +115,7 @@ class DeepXivAgent:
         papers: list[dict[str, Any]],
         question: str,
         *,
-        strict: bool = True,
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         """Return all candidate papers in reranked order with agent scores."""
         if not papers:

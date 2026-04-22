@@ -181,7 +181,7 @@ def _fulltext_message(fulltext_payload: dict[str, Any], *, attempted_acquire: bo
 async def query(
     theme_document: str,
     final_limit: int = 20,
-    agent_candidate_limit: int = 100,
+    agent_candidate_limit: int = 150,
     coarse_pool_limit: int | None = None,
     include_rationale: bool = True,
 ) -> str:

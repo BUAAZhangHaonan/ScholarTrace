@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections import Counter
 from datetime import datetime
+from typing import Any
+
+import httpx
 
 from scholartrace.models.schemas import Theme
+
+logger = logging.getLogger(__name__)
+
+_COMPRESSION_SYSTEM_PROMPT = (
+    "You are a research assistant. Given a research brief, compress it into 1-2 concise "
+    "search sentences that capture the core research topic, specific methods, and unique aspects. "
+    "Focus on distinctive keywords and phrases that would help retrieve the most relevant papers. "
+    "Output ONLY the search sentences, nothing else. No explanation, no labels, no markdown."
+)
 
 # Common English stopwords + academic filler words
 STOPWORDS = {
@@ -388,6 +402,52 @@ def _extract_heading_focus_terms(text: str) -> list[str]:
     return focus_terms
 
 
+def _compress_with_llm(document_text: str) -> str | None:
+    """Use LLM to compress the research brief into 1-2 focused search sentences."""
+    from scholartrace.config import get_settings
+
+    settings = get_settings()
+    api_key = settings.bigmodel_api_key
+    if not api_key.strip():
+        logger.debug("No BigModel API key configured; skipping LLM topic compression")
+        return None
+
+    model = settings.llm_compression_model
+    base_url = settings.bigmodel_base_url
+
+    # Truncate input to avoid overwhelming the compression model
+    truncated = document_text[:3000] if len(document_text) > 3000 else document_text
+
+    try:
+        client = httpx.Client(timeout=30.0)
+        try:
+            resp = client.post(
+                base_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": _COMPRESSION_SYSTEM_PROMPT},
+                        {"role": "user", "content": truncated},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 200,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            if content:
+                logger.info("LLM topic compression produced: %s", content[:100])
+                return content
+            return None
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning("LLM topic compression failed, skipping: %s", exc)
+        return None
+
+
 def parse_theme(document_text: str) -> Theme:
     """Parse a theme document and extract structured query formulations.
 
@@ -415,10 +475,17 @@ def parse_theme(document_text: str) -> Theme:
         focus_terms=heading_focus,
     )
 
+    # LLM-based topic compression: produces a focused search sentence
+    compressed_summary = _compress_with_llm(document_text)
+    if compressed_summary:
+        # Prepend compressed sentence as highest-priority query
+        queries = [compressed_summary] + queries
+
     return Theme(
         document_text=document_text,
         parsed_topics=topics,
         parsed_methods=methods,
         parsed_datasets=datasets,
         parsed_queries=queries,
+        compressed_summary=compressed_summary or "",
     )

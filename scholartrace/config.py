@@ -24,15 +24,15 @@ class Settings(BaseSettings):
     max_results_per_source_per_query: int = 200
     target_candidate_pool: int = 500
     max_fulltext_downloads: int = 50
-    agent_candidate_limit: int = 100
+    agent_candidate_limit: int = 150
     final_limit: int = 20
 
     # --- Ranking weights ---
-    weight_relevance: float = 0.35
-    weight_recency: float = 0.30
-    weight_influence: float = 0.10
+    weight_relevance: float = 0.45
+    weight_recency: float = 0.20
+    weight_influence: float = 0.15
     weight_venue: float = 0.10
-    weight_fulltext: float = 0.10
+    weight_fulltext: float = 0.05
     weight_source_agreement: float = 0.05
 
     # --- DeepXiv settings ---
@@ -45,13 +45,15 @@ class Settings(BaseSettings):
     bigmodel_api_key: str = ""
     bigmodel_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     bigmodel_model: str = "glm-5-turbo"
+    bigmodel_fallback_models: str = "glm-4-plus,glm-4-flash"
+    llm_compression_model: str = "glm-4-flash"
 
     # --- DeepXiv agent robustness ---
     deepxiv_agent_http_timeout_seconds: float = 45.0
     deepxiv_agent_total_timeout_seconds: float = 120.0
     deepxiv_agent_max_retries: int = 2
     deepxiv_agent_retry_backoff_seconds: float = 2.0
-    deepxiv_agent_batch_size: int = 30
+    deepxiv_agent_batch_size: int = 40
     deepxiv_agent_fallback_top_k: int = 20
 
     # --- Server settings ---

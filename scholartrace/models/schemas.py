@@ -108,6 +108,7 @@ class Theme(BaseModel):
     parsed_methods: list[str] = Field(default_factory=list)
     parsed_datasets: list[str] = Field(default_factory=list)
     parsed_queries: list[str] = Field(default_factory=list)
+    compressed_summary: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

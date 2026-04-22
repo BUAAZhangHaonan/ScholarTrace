@@ -162,6 +162,26 @@ class TestRecencyBoost:
         assert result[0].title == "New Paper"
         assert result[0].recency_score > result[1].recency_score
 
+    def test_old_paper_soft_penalty_applies_without_hard_cutoff(self):
+        # Even with recency weight disabled, old papers are softly penalized
+        # unless supported by stronger influence.
+        weights = {
+            "weight_relevance": 0.0,
+            "weight_recency": 0.0,
+            "weight_influence": 1.0,
+            "weight_venue": 0.0,
+            "weight_fulltext": 0.0,
+            "weight_source_agreement": 0.0,
+        }
+        works = [
+            _work(title="Old Same-Citation", year=2016, citation_count=100),
+            _work(title="New Same-Citation", year=2026, citation_count=100),
+            _work(title="Anchor High-Citation", year=2026, citation_count=3000),
+        ]
+        result = rank_papers(works, _theme(), weights=weights)
+        titles = [w.title for w in result]
+        assert titles.index("New Same-Citation") < titles.index("Old Same-Citation")
+
 
 class TestInfluenceBoost:
     """Highly cited papers should get an influence boost."""

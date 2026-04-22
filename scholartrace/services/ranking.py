@@ -96,12 +96,13 @@ def _relevance_scores(works: Sequence[Work], theme: Theme) -> list[float]:
         anchor_tokens.extend(re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", fragment.lower()))
     theme_doc = " ".join(anchor_tokens)
 
-    # Paper documents: title + " " + abstract
+    # Paper documents: title repeated 2x + abstract for stronger title signal
     paper_docs: list[str] = []
     for w in works:
         parts: list[str] = []
         if w.title:
             parts.append(w.title)
+            parts.append(w.title)  # title 2x for emphasis
         if w.abstract:
             parts.append(w.abstract)
         paper_docs.append(" ".join(parts))
@@ -164,6 +165,29 @@ def _source_agreement_score(source_provenance: list[str]) -> float:
     return min(len(source_provenance) / 3, 1.0)
 
 
+def _staleness_penalty(
+    year: int | None,
+    influence_score: float,
+    *,
+    current_year: int = 2026,
+) -> float:
+    """Softly penalize older low-impact papers without hard date cutoffs.
+
+    No penalty is applied for papers published within the most recent 2 years.
+    For older papers, stronger influence mitigates the penalty.
+    """
+    if year is None:
+        return 0.0
+
+    age = max(0, current_year - year)
+    if age <= 2:
+        return 0.0
+
+    age_factor = min((age - 2) / 6.0, 1.0)
+    influence_shield = float(np.clip(influence_score, 0.0, 1.0))
+    return float(np.clip(age_factor * (1.0 - influence_shield), 0.0, 1.0))
+
+
 # ── Main entry point ─────────────────────────────────────────────────
 def rank_papers(
     works: list[Work],
@@ -215,6 +239,10 @@ def rank_papers(
             + w["weight_fulltext"] * ft
             + w["weight_source_agreement"] * sa
         )
+
+        stale_penalty = _staleness_penalty(work.year, inf)
+        composite *= 1.0 - 0.30 * stale_penalty
+        composite = float(np.clip(composite, 0.0, 1.0))
 
         work.relevance_score = rel
         work.recency_score = rec
