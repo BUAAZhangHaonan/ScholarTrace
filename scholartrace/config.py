@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     bigmodel_api_key: str = ""
     bigmodel_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     bigmodel_model: str = "glm-5-turbo"
-    bigmodel_fallback_models: str = "glm-4-plus,glm-4-flash"
-    llm_compression_model: str = "glm-4-flash"
+    bigmodel_fallback_models: str = "glm-4.6,glm-4.7"
+    llm_compression_model: str = "glm-4.7"
 
     # --- DeepXiv agent robustness ---
     deepxiv_agent_http_timeout_seconds: float = 45.0
