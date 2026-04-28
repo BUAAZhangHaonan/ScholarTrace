@@ -69,7 +69,7 @@ class RuntimeBudgetManager:
             self._inflight.clear()
 
 
-RETRIEVAL_JOB_POLICY = BudgetPolicy("retrieval_job", limit=5, window_seconds=60, concurrency=2)
+RETRIEVAL_JOB_POLICY = BudgetPolicy("retrieval_job", limit=10, window_seconds=60, concurrency=3)
 FULLTEXT_ACQUIRE_POLICY = BudgetPolicy("fulltext_acquire", limit=20, window_seconds=600, concurrency=4)
 DEEPXIV_SEARCH_POLICY = BudgetPolicy("deepxiv_search", limit=30, window_seconds=60, concurrency=4)
 AGENT_FILTER_POLICY = BudgetPolicy("agent_filter", limit=10, window_seconds=60, concurrency=2)

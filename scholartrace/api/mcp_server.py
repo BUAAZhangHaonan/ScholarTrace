@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from functools import wraps
@@ -17,6 +18,9 @@ from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
+
+# Concurrency limiter for MCP query requests — queues instead of rejecting.
+_query_semaphore = asyncio.Semaphore(3)
 
 
 def create_mcp(settings: Settings | None = None) -> FastMCP:
@@ -75,14 +79,16 @@ def safe_tool(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
-        except runtime_limits.RateLimitExceeded as exc:
-            return tool_error_json("rate_limited", str(exc), retryable=True)
+        except runtime_limits.RateLimitExceeded:
+            # Should not reach here for query() (uses semaphore), but
+            # keep as safety net for other tools (read, etc.)
+            return tool_error_json("busy", "Server is busy, please retry shortly", retryable=True)
         except Exception:
             logger.exception("MCP tool %s failed", func.__name__)
             return tool_error_json(
                 "internal_error",
-                "Internal server error",
-                retryable=False,
+                "An internal error occurred. Please try again.",
+                retryable=True,
             )
 
     return wrapper
@@ -186,33 +192,31 @@ async def query(
     include_rationale: bool = True,
 ) -> str:
     """Run the full MCP query pipeline and return the final reranked papers."""
-    async with runtime_limits.budget_manager.enforce(
-        runtime_limits.RETRIEVAL_JOB_POLICY,
-        "mcp",
-    ):
+    import time as _time
+
+    req_start = _time.monotonic()
+    doc_preview = theme_document[:80].replace("\n", " ")
+    logger.info(
+        "[MCP] query() called: doc=%r... final=%d agent_limit=%d",
+        doc_preview, final_limit, agent_candidate_limit,
+    )
+
+    # Use semaphore for concurrency — waits in queue, never rejects.
+    async with _query_semaphore:
         storage = _get_storage()
         settings = get_settings()
         from scholartrace.services.fulltext import read_cached_fulltext
-        from scholartrace.services.retrieval import (
-            QueryPipelineConfigurationError,
-            QueryPipelineRuntimeError,
-            run_query_pipeline,
-        )
+        from scholartrace.services.retrieval import run_query_pipeline
 
-        try:
-            result = await run_query_pipeline(
-                theme_document,
-                storage,
-                settings=settings,
-                final_limit=final_limit,
-                agent_candidate_limit=agent_candidate_limit,
-                coarse_pool_limit=coarse_pool_limit,
-                include_rationale=include_rationale,
-            )
-        except QueryPipelineConfigurationError as exc:
-            return tool_error_json("configuration_error", str(exc), retryable=False)
-        except QueryPipelineRuntimeError as exc:
-            return tool_error_json("query_failed", str(exc), retryable=True)
+        result = await run_query_pipeline(
+            theme_document,
+            storage,
+            settings=settings,
+            final_limit=final_limit,
+            agent_candidate_limit=agent_candidate_limit,
+            coarse_pool_limit=coarse_pool_limit,
+            include_rationale=include_rationale,
+        )
 
         papers = [
             _query_paper_payload(
@@ -223,6 +227,11 @@ async def query(
             )
             for work in result.works
         ]
+
+    logger.info(
+        "[MCP] query() done in %.2fs: %d papers returned",
+        _time.monotonic() - req_start, len(papers),
+    )
 
     payload = {
         "theme_id": result.theme.id,
