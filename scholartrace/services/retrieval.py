@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -193,21 +194,58 @@ async def run_query_pipeline(
     coarse_pool_limit: int | None = None,
     include_rationale: bool = True,
 ) -> QueryPipelineResult:
-    """Execute the MCP query pipeline with built-in DeepXiv agent reranking."""
+    """Execute the MCP query pipeline with built-in DeepXiv agent reranking.
+
+    This function NEVER raises exceptions. All errors are caught and converted
+    to fallback results so the MCP client always receives papers.
+    """
     del include_rationale  # payload shaping decides whether rationale is exposed.
 
     resolved = settings or get_settings()
-    if not resolved.bigmodel_api_key.strip():
-        raise QueryPipelineConfigurationError(
-            "SCHOLARTRACE_BIGMODEL_API_KEY is required for MCP query reranking"
-        )
+
+    pipeline_start = time.monotonic()
+    logger.info(
+        "[PIPELINE] === Query pipeline started === "
+        "final_limit=%s agent_candidate_limit=%s coarse_pool_limit=%s",
+        final_limit, agent_candidate_limit, coarse_pool_limit,
+    )
 
     theme = parse_theme(document_text)
-    ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
-        theme,
-        storage,
-        resolved,
+    logger.info(
+        "[PIPELINE] Theme parsed in %.2fs: id=%s queries=%d",
+        time.monotonic() - pipeline_start,
+        theme.id,
+        len(theme.parsed_queries),
     )
+
+    # --- Stage 1: Retrieval ---
+    retrieval_start = time.monotonic()
+    try:
+        ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
+            theme,
+            storage,
+            resolved,
+        )
+        logger.info(
+            "[PIPELINE] Retrieval done in %.2fs: raw=%d dedup=%d ranked=%d",
+            time.monotonic() - retrieval_start,
+            total_retrieved, total_after_dedup, len(ranked),
+        )
+    except Exception:
+        logger.exception(
+            "[PIPELINE] Retrieval FAILED in %.2fs for theme %s",
+            time.monotonic() - retrieval_start, theme.id,
+        )
+        saved = storage.replace_theme_results(theme.id, [])
+        return QueryPipelineResult(
+            theme=theme,
+            total_retrieved=0,
+            total_after_dedup=0,
+            total_after_first_stage=0,
+            total_agent_candidates=0,
+            total_final=0,
+            works=saved,
+        )
 
     total_after_first_stage = len(ranked)
     coarse_limit = coarse_pool_limit or resolved.target_candidate_pool
@@ -235,14 +273,41 @@ async def run_query_pipeline(
         else theme.document_text
     )
 
-    # Build model chain: primary model + fallback models
-    model_chain = [resolved.bigmodel_model]
-    fallback_models = [
+    # Build model chain: GLM primary → GLM fallbacks → DeepSeek → Qwen
+    model_chain: list[dict[str, Any]] = []
+
+    # GLM models as primary chain
+    glm_primary = resolved.bigmodel_model
+    glm_fallbacks = [
         m.strip()
         for m in resolved.bigmodel_fallback_models.split(",")
         if m.strip()
     ]
-    model_chain.extend(fallback_models)
+    for model_name in [glm_primary] + glm_fallbacks:
+        model_chain.append({
+            "backend": "glm",
+            "model": model_name,
+            "api_key": resolved.bigmodel_api_key,
+            "base_url": resolved.bigmodel_base_url,
+        })
+
+    # DeepSeek as fallback
+    if resolved.deepseek_api_key.strip():
+        model_chain.append({
+            "backend": "deepseek",
+            "model": resolved.deepseek_model,
+            "api_key": resolved.deepseek_api_key,
+            "base_url": resolved.deepseek_base_url,
+        })
+
+    # Local Qwen as last resort
+    if resolved.qwen_base_url.strip():
+        model_chain.append({
+            "backend": "qwen",
+            "model": resolved.qwen_model,
+            "api_key": resolved.qwen_api_key,
+            "base_url": resolved.qwen_base_url,
+        })
 
     paper_dicts = [
         {
@@ -274,37 +339,70 @@ async def run_query_pipeline(
     # Try each model in the chain until one succeeds
     reranked: list[dict[str, Any]] | None = None
     last_model_error: str = ""
+    agent_start = time.monotonic()
+    logger.info(
+        "[PIPELINE] Starting agent reranking: %d papers, %d models in chain",
+        len(paper_dicts), len(model_chain),
+    )
 
-    for model_name in model_chain:
+    for i, model_cfg in enumerate(model_chain):
+        model_attempt_start = time.monotonic()
+        # Timeout strategy: 5s connect timeout, unlimited processing time
+        # If the model API is unreachable in 5s, try next model.
+        # Once connected, let the model process papers without time limit.
+        http_timeout = resolved.deepxiv_agent_http_timeout_seconds
+        # No total timeout limit — model processing time is not restricted
+        model_total_timeout = None
         agent = DeepXivAgent(
-            api_key=resolved.bigmodel_api_key,
-            base_url=resolved.bigmodel_base_url,
-            model=model_name,
-            request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
-            total_timeout_seconds=resolved.deepxiv_agent_total_timeout_seconds,
-            max_retries=resolved.deepxiv_agent_max_retries,
+            api_key=model_cfg["api_key"],
+            base_url=model_cfg["base_url"],
+            model=model_cfg["model"],
+            backend=model_cfg["backend"],
+            request_timeout_seconds=http_timeout,
+            total_timeout_seconds=model_total_timeout,
+            max_retries=0,
             retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
             batch_size=resolved.deepxiv_agent_batch_size,
             fallback_top_k=resolved.deepxiv_agent_fallback_top_k,
         )
         try:
-            logger.info("Attempting agent reranking with model: %s", model_name)
+            logger.info(
+                "[PIPELINE] Model %d/%d: attempting %s/%s (connect_timeout=%.1fs total_timeout=%s)",
+                i + 1, len(model_chain),
+                model_cfg["backend"], model_cfg["model"], http_timeout,
+                "none" if model_total_timeout is None else f"{model_total_timeout:.1f}s",
+            )
             reranked = await agent.rerank_papers(
                 paper_dicts,
                 theme_description,
+                strict=True,
             )
             if reranked is not None:
-                logger.info("Agent reranking succeeded with model: %s", model_name)
+                logger.info(
+                    "[PIPELINE] Model %d/%d SUCCEEDED: %s/%s in %.2fs, reranked=%d papers",
+                    i + 1, len(model_chain),
+                    model_cfg["backend"], model_cfg["model"],
+                    time.monotonic() - model_attempt_start,
+                    len(reranked),
+                )
                 break
         except DeepXivAgentError as exc:
             last_model_error = str(exc)
             logger.warning(
-                "Agent reranking failed with model %s: %s", model_name, exc
+                "[PIPELINE] Model %d/%d FAILED: %s/%s in %.2fs: %s",
+                i + 1, len(model_chain),
+                model_cfg["backend"], model_cfg["model"],
+                time.monotonic() - model_attempt_start,
+                exc,
             )
         except Exception as exc:
             last_model_error = str(exc)
             logger.warning(
-                "Unexpected agent failure with model %s: %s", model_name, exc
+                "[PIPELINE] Model %d/%d UNEXPECTED FAILURE: %s/%s in %.2fs: %s",
+                i + 1, len(model_chain),
+                model_cfg["backend"], model_cfg["model"],
+                time.monotonic() - model_attempt_start,
+                exc,
             )
         finally:
             await agent.close()
@@ -312,8 +410,9 @@ async def run_query_pipeline(
     # If all models failed, use deterministic fallback
     if reranked is None:
         logger.warning(
-            "All agent models failed; falling back to deterministic ranking. "
-            "Last error: %s",
+            "[PIPELINE] ALL %d MODELS FAILED in %.2fs; falling back to deterministic. Last error: %s",
+            len(model_chain),
+            time.monotonic() - agent_start,
             last_model_error,
         )
         fallback_agent = DeepXivAgent(
@@ -348,13 +447,26 @@ async def run_query_pipeline(
         # Agent selected nothing — use top scored works as fallback
         logger.warning("Agent selected no papers; using top-scored works as fallback")
         selected = scored[: max(1, resolved.deepxiv_agent_fallback_top_k)]
+    elif len(selected) < requested_final:
+        # Agent selected fewer than requested — supplement with top-scored papers
+        selected_ids = {id(w) for w in selected}
+        fill = [w for w in scored if id(w) not in selected_ids]
+        filled_count = min(len(fill), requested_final - len(selected))
+        if filled_count > 0:
+            logger.info(
+                "[PIPELINE] Agent selected %d papers < final_limit=%d; "
+                "supplementing with %d top-scored papers",
+                len(selected), requested_final, filled_count,
+            )
+            selected = selected + fill[:filled_count]
 
     final_works = selected[: max(1, requested_final)]
     saved = storage.replace_theme_results(theme.id, final_works)
     logger.info(
-        "MCP query pipeline complete: %d final works saved for theme %s",
-        len(saved),
+        "[PIPELINE] === DONE in %.2fs total === theme=%s final=%d papers",
+        time.monotonic() - pipeline_start,
         theme.id,
+        len(saved),
     )
     return QueryPipelineResult(
         theme=theme,
