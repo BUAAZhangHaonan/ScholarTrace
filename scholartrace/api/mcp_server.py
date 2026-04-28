@@ -20,7 +20,8 @@ from scholartrace.services.storage import StorageService
 logger = logging.getLogger(__name__)
 
 # Concurrency limiter for MCP query requests — queues instead of rejecting.
-_query_semaphore = asyncio.Semaphore(3)
+# Increased to 10 to match the total concurrent model pool capacity.
+_query_semaphore = asyncio.Semaphore(10)
 
 
 def create_mcp(settings: Settings | None = None) -> FastMCP:
