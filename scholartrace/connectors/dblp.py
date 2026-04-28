@@ -43,8 +43,7 @@ class DblpConnector(BaseConnector):
                 "f": first,
                 "format": "json",
             }
-            resp = await self._client.get("", params=params)
-            resp.raise_for_status()
+            resp = await self._http_get_with_retry(self._client, "", params=params)
             body = resp.json()
 
             result = body.get("result", {})

@@ -47,8 +47,7 @@ class ArxivConnector(BaseConnector):
                 "start": start,
                 "max_results": page_size,
             }
-            resp = await self._client.get("/query", params=params)
-            resp.raise_for_status()
+            resp = await self._http_get_with_retry(self._client, "/query", params=params)
 
             entries = _parse_atom_entries(resp.text)
             if not entries:

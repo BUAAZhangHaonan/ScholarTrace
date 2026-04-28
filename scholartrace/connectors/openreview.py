@@ -43,8 +43,7 @@ class OpenReviewConnector(BaseConnector):
                 "limit": limit,
                 "offset": offset,
             }
-            resp = await self._client.get("/notes/search", params=params)
-            resp.raise_for_status()
+            resp = await self._http_get_with_retry(self._client, "/notes/search", params=params)
             body = resp.json()
 
             notes = body.get("notes", [])

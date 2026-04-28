@@ -49,8 +49,7 @@ class OpenAlexConnector(BaseConnector):
                 "cursor": cursor,
                 "select": _FIELDS,
             }
-            resp = await self._client.get("/works", params=params)
-            resp.raise_for_status()
+            resp = await self._http_get_with_retry(self._client, "/works", params=params)
             body = resp.json()
 
             for work in body.get("results", []):
