@@ -181,7 +181,7 @@ class DeepXivAgent:
         client_kwargs: dict[str, Any] = {
             "timeout": httpx.Timeout(
                 connect=self._request_timeout_seconds,  # 5s: fail fast if API unreachable
-                read=300.0,   # 5min: generous read timeout for model processing
+                read=120.0,   # 2min: balance between model processing and responsiveness
                 write=5.0,
                 pool=5.0,
             ),

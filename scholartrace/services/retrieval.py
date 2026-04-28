@@ -550,7 +550,7 @@ async def run_query_pipeline(
             model=entry.model,
             backend=entry.backend,
             request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
-            total_timeout_seconds=None,
+            total_timeout_seconds=resolved.agent_total_timeout_seconds,
             max_retries=0,
             retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
         )
