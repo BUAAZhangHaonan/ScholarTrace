@@ -56,6 +56,8 @@ _DEFAULT_BATCH_SIZE = 10
 _FALLBACK_BATCH_SIZE = 5
 _SINGLE_PAPER_BATCH_SIZE = 1
 _GLM_MAX_TOKENS = 128_000
+_QWEN_MAX_TOKENS = 32_768
+_DEEPSEEK_MAX_TOKENS = 128_000
 
 
 class DeepXivAgentError(RuntimeError):
@@ -76,13 +78,19 @@ class DeepXivAgentError(RuntimeError):
 
 
 class DeepXivAgent:
-    """Agent that reranks papers using the configured BigModel GLM endpoint."""
+    """Agent that reranks papers using the configured LLM endpoint.
+
+    Supports two backends:
+    - "glm": Zhipu BigModel GLM API (sends thinking: enabled)
+    - "qwen": Local Qwen via vLLM (sends chat_template_kwargs to disable thinking)
+    """
 
     def __init__(
         self,
         api_key: str,
         base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
         model: str = "glm-5-turbo",
+        backend: str = "glm",
         max_fulltext: int = 20,
         prompt_budget: PromptBudget = DEFAULT_PROMPT_BUDGET,
         request_timeout_seconds: float = 45.0,
@@ -95,17 +103,30 @@ class DeepXivAgent:
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
+        self._backend = backend
         self._max_fulltext = max_fulltext
         self._prompt_budget = prompt_budget
         self._request_timeout_seconds = max(1.0, request_timeout_seconds)
-        self._total_timeout_seconds = max(1.0, total_timeout_seconds)
+        self._total_timeout_seconds = (
+            max(1.0, total_timeout_seconds) if total_timeout_seconds is not None else None
+        )
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.1, retry_backoff_seconds)
         self._batch_size = max(_SINGLE_PAPER_BATCH_SIZE, batch_size)
         self._fallback_top_k = max(1, fallback_top_k)
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self._request_timeout_seconds)
-        )
+        # Local backends (Qwen/vLLM) bypass proxy to avoid SOCKS issues
+        # Timeout strategy: 5s connect, unlimited read (let model process)
+        client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(
+                connect=self._request_timeout_seconds,  # 5s: fail fast if API unreachable
+                read=300.0,   # 5min: generous read timeout for model processing
+                write=5.0,
+                pool=5.0,
+            ),
+        }
+        if backend == "qwen":
+            client_kwargs["trust_env"] = False
+        self._client = httpx.AsyncClient(**client_kwargs)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -127,7 +148,11 @@ class DeepXivAgent:
             return self._fallback_rerank(papers, question, reason_tag="missing_api_key")
 
         try:
-            async with asyncio.timeout(self._total_timeout_seconds):
+            if self._total_timeout_seconds is not None:
+                async with asyncio.timeout(self._total_timeout_seconds):
+                    filter_results = await self._call_llm_filter(papers, question, strict=strict)
+            else:
+                # No total timeout — let the model process without time limit
                 filter_results = await self._call_llm_filter(papers, question, strict=strict)
         except TimeoutError as exc:
             message = (
@@ -404,6 +429,27 @@ class DeepXivAgent:
 
     def _request_payload(self, user_msg: str) -> dict[str, Any]:
         system_prompt = self._build_system_prompt()
+        if self._backend == "qwen":
+            return {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                "max_tokens": _QWEN_MAX_TOKENS,
+                "temperature": 0.3,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        if self._backend == "deepseek":
+            return {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                "max_tokens": _DEEPSEEK_MAX_TOKENS,
+                "temperature": 0.3,
+            }
         return {
             "model": self._model,
             "messages": [
@@ -503,6 +549,23 @@ class DeepXivAgent:
                 )
                 resp.raise_for_status()
                 data = resp.json()
+
+                # Handle GLM business errors returned with HTTP 200
+                # (e.g. rate limit 1302, quota errors, etc.)
+                if "error" in data and "choices" not in data:
+                    error_obj = data["error"]
+                    biz_code = error_obj.get("code", "unknown") if isinstance(error_obj, dict) else "unknown"
+                    biz_msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
+                    error_message = f"GLM business error (code {biz_code}): {biz_msg}"
+                    logger.error("GLM API error: %s", error_message)
+                    if attempt < self._max_retries:
+                        await self._sleep_before_retry(attempt, f"business error {biz_code}")
+                        continue
+                    raise DeepXivAgentError(
+                        error_message,
+                        provider_code=str(biz_code),
+                    )
+
                 content = data["choices"][0]["message"]["content"]
                 break
             except httpx.TimeoutException as exc:
