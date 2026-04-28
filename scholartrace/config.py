@@ -45,15 +45,28 @@ class Settings(BaseSettings):
     bigmodel_api_key: str = ""
     bigmodel_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
     bigmodel_model: str = "glm-5-turbo"
-    bigmodel_fallback_models: str = "glm-4.6,glm-4.7"
+    bigmodel_fallback_models: str = "glm-4.7,glm-4.6"
     llm_compression_model: str = "glm-4.7"
 
+    # --- Local Qwen settings (fallback backend) ---
+    qwen_api_key: str = "sk-local-qwen3"
+    qwen_base_url: str = "http://10.134.87.107:8000/v1/chat/completions"
+    qwen_model: str = "Qwen/Qwen3.5-27B-GPTQ-Int4"
+
+    # --- Model chain timeout ---
+    model_timeout_seconds: float = 5.0
+
+    # --- DeepSeek settings ---
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
+    deepseek_model: str = "deepseek-chat"
+
     # --- DeepXiv agent robustness ---
-    deepxiv_agent_http_timeout_seconds: float = 45.0
+    deepxiv_agent_http_timeout_seconds: float = 5.0
     deepxiv_agent_total_timeout_seconds: float = 120.0
-    deepxiv_agent_max_retries: int = 2
-    deepxiv_agent_retry_backoff_seconds: float = 2.0
-    deepxiv_agent_batch_size: int = 40
+    deepxiv_agent_max_retries: int = 0
+    deepxiv_agent_retry_backoff_seconds: float = 1.0
+    deepxiv_agent_batch_size: int = 30
     deepxiv_agent_fallback_top_k: int = 20
 
     # --- Server settings ---
@@ -67,6 +80,8 @@ class Settings(BaseSettings):
 
     model_config = {
         "env_prefix": "SCHOLARTRACE_",
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
     }
 
 
