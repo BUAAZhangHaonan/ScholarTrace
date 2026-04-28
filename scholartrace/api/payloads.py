@@ -68,19 +68,6 @@ def theme_export_json_payload(theme: Any, works: Iterable[Work | Any]) -> dict[s
     }
 
 
-def theme_report_json_payload(theme_id: str, theme: Any, works: Iterable[Work | Any]) -> dict[str, Any]:
-    paper_list = public_work_list_payload(works)
-    return {
-        "theme_id": theme_id,
-        "parsed_topics": theme.parsed_topics,
-        "parsed_methods": theme.parsed_methods,
-        "parsed_datasets": theme.parsed_datasets,
-        "parsed_queries": theme.parsed_queries,
-        "total_papers": len(paper_list),
-        "papers": paper_list,
-    }
-
-
 def deepxiv_search_payload(candidates: Iterable[Any]) -> dict[str, Any]:
     papers: list[dict[str, Any]] = []
     for candidate in candidates:

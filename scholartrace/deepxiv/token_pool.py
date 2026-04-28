@@ -68,11 +68,6 @@ class TokenPool:
             register_sdk_secret=runtime_settings.deepxiv_register_sdk_secret,
         )
 
-    @classmethod
-    def from_env(cls) -> TokenPool:
-        """Compatibility helper that still uses canonical ScholarTrace settings."""
-        return cls.from_settings(get_settings())
-
     @property
     def size(self) -> int:
         return len(self._tokens)
