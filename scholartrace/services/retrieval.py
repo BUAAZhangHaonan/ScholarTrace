@@ -28,6 +28,25 @@ from scholartrace.services.theme_parser import parse_theme
 
 logger = logging.getLogger(__name__)
 
+# Module-level global LLM semaphore — shared across ALL concurrent queries.
+# This prevents N parallel queries each launching M concurrent LLM calls,
+# which would overwhelm the API provider's rate limit.
+# Initialized lazily on first use via _get_llm_semaphore().
+_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """Return the global LLM concurrency semaphore, creating it if needed."""
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        settings = get_settings()
+        _llm_semaphore = asyncio.Semaphore(settings.llm_global_concurrency)
+        logger.info(
+            "[PIPELINE] Global LLM semaphore initialized with concurrency=%d",
+            settings.llm_global_concurrency,
+        )
+    return _llm_semaphore
+
 
 @dataclass(frozen=True)
 class QueryPipelineResult:
@@ -231,7 +250,7 @@ async def _run_stage1_scoring(
         batches.append((i, paper_dicts[i:i + batch_size]))
 
     system_prompt = DeepXivAgent.build_stage1_prompt()
-    semaphore = asyncio.Semaphore(settings.stage1_concurrency)
+    semaphore = _get_llm_semaphore()
 
     async def _score_batch(
         batch_offset: int,
