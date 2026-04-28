@@ -35,6 +35,16 @@ from scholartrace.services.retrieval import (
 )
 from scholartrace.services.storage import StorageService
 
+import scholartrace.services.retrieval as retrieval_mod
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_semaphore():
+    """Reset the global LLM semaphore before each test to avoid state leakage."""
+    retrieval_mod._llm_semaphore = None
+    yield
+    retrieval_mod._llm_semaphore = None
+
 
 # ---------------------------------------------------------------------------
 # Base mock agent — provides static methods that retrieval.py calls on the class
@@ -201,7 +211,7 @@ class TestTwoStagePipeline:
             two_stage_enabled=True,
             stage1_model="glm-4.6",
             stage1_batch_size=10,
-            stage1_concurrency=20,
+            llm_global_concurrency=20,
             stage1_max_retries=1,
             stage2_model="glm-5-turbo",
             stage2_max_context_tokens=100_000,
@@ -217,8 +227,6 @@ class TestTwoStagePipeline:
                 for _ in range(5)
             ],  # arxiv, s2, dblp, openreview, crossref
         ]
-
-        import scholartrace.services.retrieval as retrieval_mod
 
         call_log = {"stage1_calls": 0, "stage2_calls": 0}
 
@@ -294,8 +302,6 @@ class TestTwoStagePipeline:
         cands = _many_candidates(10)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, model="glm-4.6", **kwargs):
                 self._model = model
@@ -343,8 +349,6 @@ class TestTwoStagePipeline:
         cands = _many_candidates(10)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         class _FailingAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
                 pass
@@ -384,8 +388,6 @@ class TestTwoStagePipeline:
 
         mock_connectors = [_make_mock_connector([])] * 6
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         monkeypatch.setattr(retrieval_mod, "_build_connectors", lambda _s: mock_connectors)
         monkeypatch.setattr(retrieval_mod, "parse_theme", lambda doc: theme, raising=False)
 
@@ -410,15 +412,13 @@ class TestTwoStagePipeline:
             bigmodel_api_key="glm-key",
             two_stage_enabled=True,
             stage1_batch_size=10,
-            stage1_concurrency=20,
+            llm_global_concurrency=20,
             agent_candidate_limit=200,
             final_limit=20,
         )
 
         cands = _many_candidates(200)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
-
-        import scholartrace.services.retrieval as retrieval_mod
 
         batch_counts = {"stage1": 0}
 
@@ -487,8 +487,6 @@ class TestSingleStageRegression:
         cands = _many_candidates(5)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
                 pass
@@ -542,8 +540,6 @@ class TestConcurrency:
         ]
 
         call_counts = {"total": 0}
-
-        import scholartrace.services.retrieval as retrieval_mod
 
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
@@ -626,8 +622,6 @@ class TestConcurrency:
             final_limit=3,
         )
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
                 pass
@@ -692,8 +686,6 @@ class TestEdgeCases:
         cands = [_make_candidate("Only Paper", doi="10.1/only", openalex_id="W-only")]
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
 
-        import scholartrace.services.retrieval as retrieval_mod
-
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
                 pass
@@ -731,8 +723,6 @@ class TestEdgeCases:
 
         cands = _many_candidates(10)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
-
-        import scholartrace.services.retrieval as retrieval_mod
 
         class _FakeAgent(_FakeAgentBase):
             def __init__(self, *args, **kwargs):
@@ -777,8 +767,6 @@ class TestEdgeCases:
 
         cands = _many_candidates(20)
         mock_connectors = [_make_mock_connector(cands)] + [_make_mock_connector([]) for _ in range(5)]
-
-        import scholartrace.services.retrieval as retrieval_mod
 
         batch_counter = [0]
 
