@@ -344,6 +344,13 @@ pytest tests/ -q
 python -m compileall scholartrace examples/glm_scholar_search.py
 ```
 
+## Architecture
+
+Pipeline flow diagrams are in [`docs/architecture/pipeline_flow.md`](docs/architecture/pipeline_flow.md):
+
+- **Query pipeline**: MCP `query()` → multi-source retrieval → dedup → deterministic ranking → two-stage LLM rerank (Stage 1: glm-4.6 batch scoring, Stage 2: glm-5-turbo global selection) → final papers
+- **Read pipeline**: MCP `read()` → layered access (summary → sections → fulltext → direct_evidence) with on-demand acquisition
+
 ## License
 
 MIT
