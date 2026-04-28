@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     max_results_per_source_per_query: int = 200
     target_candidate_pool: int = 500
     max_fulltext_downloads: int = 50
-    agent_candidate_limit: int = 150
-    final_limit: int = 20
+    agent_candidate_limit: int = 200
+    final_limit: int = 25
 
     # --- Ranking weights ---
     weight_relevance: float = 0.45
@@ -61,14 +61,16 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
     deepseek_model: str = "deepseek-chat"
 
-    # --- Two-stage pipeline ---
-    two_stage_enabled: bool = False
-    stage1_model: str = "glm-4.6"
-    stage1_batch_size: int = 20
-    stage1_max_retries: int = 2
+    # --- Agent global selection ---
     stage2_model: str = "glm-5-turbo"
     stage2_max_context_tokens: int = 100_000
-    llm_global_concurrency: int = 15
+
+    # --- Model pool ---
+    glm_primary_max_concurrent: int = 5       # glm-5-turbo
+    glm_fallback_max_concurrent: int = 20     # glm-4.7, glm-4.6
+    deepseek_max_concurrent: int = 10         # deepseek
+    qwen_max_concurrent: int = 10             # qwen
+    model_pool_cooldown_seconds: float = 60.0  # cooldown after model error
 
     # --- DeepXiv agent robustness ---
     deepxiv_agent_http_timeout_seconds: float = 5.0
