@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,7 @@ from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
 from scholartrace.deepxiv.agent import DeepXivAgent, DeepXivAgentError
 from scholartrace.models.schemas import RawCandidate, Theme, Work
 from scholartrace.services.dedup import deduplicate_candidates
+from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET
 from scholartrace.services.ranking import rank_papers
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
@@ -158,6 +160,463 @@ async def _collect_ranked_works(
         )
 
 
+def _estimate_papers_tokens(
+    papers: list[dict[str, Any]],
+    question: str,
+    system_prompt: str,
+) -> int:
+    """Roughly estimate token cost for a set of papers + system/user messages."""
+    budget = DEFAULT_PROMPT_BUDGET
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+    ]
+    fixed_cost = budget.estimate_messages(messages)
+    paper_cost = sum(
+        budget.estimate_text(DeepXivAgent.paper_snippet(p))
+        for p in papers
+    )
+    return fixed_cost + paper_cost
+
+
+def _compute_stage1_scores(
+    batch_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert Stage 1 raw LLM output into scored items with agent_score."""
+    scored: list[dict[str, Any]] = []
+    for result in batch_results:
+        idx = result.get("index")
+        if not isinstance(idx, int):
+            continue
+        relevance = float(result.get("relevance", 0) or 0)
+        recency = float(result.get("recency", 0) or 0)
+        novelty = float(result.get("novelty", 0) or 0)
+        quality = float(result.get("quality", 0) or 0)
+        score = relevance + recency * 0.6 + novelty * 0.3 + quality * 0.2
+        scored.append({
+            "index": idx,
+            "agent_score": score,
+            "agent_rationale": result.get("reason", ""),
+            "relevance": relevance,
+            "recency": recency,
+            "novelty": novelty,
+            "quality": quality,
+        })
+    return scored
+
+
+async def _run_stage1_scoring(
+    paper_dicts: list[dict[str, Any]],
+    question: str,
+    settings: Settings,
+    final_limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Stage 1: distribute papers across small batches, score concurrently with glm-4.6.
+
+    Returns (top_candidates_with_scores, stage1_success).
+    Each item in top_candidates has 'original_index', 'agent_score', 'agent_rationale'.
+    """
+    batch_size = settings.stage1_batch_size
+    num_batches = math.ceil(len(paper_dicts) / batch_size) if paper_dicts else 1
+    K = math.ceil(final_limit * 2 / num_batches) if num_batches > 0 else final_limit * 2
+
+    logger.info(
+        "[PIPELINE] Stage 1: %d papers, batch_size=%d, %d batches, K=%d per batch",
+        len(paper_dicts), batch_size, num_batches, K,
+    )
+
+    # Split papers into batches
+    batches: list[tuple[int, list[dict[str, Any]]]] = []
+    for i in range(0, len(paper_dicts), batch_size):
+        batches.append((i, paper_dicts[i:i + batch_size]))
+
+    system_prompt = DeepXivAgent.build_stage1_prompt()
+    semaphore = asyncio.Semaphore(settings.stage1_concurrency)
+
+    async def _score_batch(
+        batch_offset: int,
+        batch_papers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Score one batch, return scored items with global indices."""
+        async with semaphore:
+            agent = DeepXivAgent(
+                api_key=settings.bigmodel_api_key,
+                base_url=settings.bigmodel_base_url,
+                model=settings.stage1_model,
+                backend="glm",
+                request_timeout_seconds=settings.deepxiv_agent_http_timeout_seconds,
+                total_timeout_seconds=None,
+                max_retries=1,
+                retry_backoff_seconds=settings.deepxiv_agent_retry_backoff_seconds,
+                batch_size=len(batch_papers),
+            )
+            try:
+                results = await agent.score_papers_batch(
+                    batch_papers,
+                    question,
+                    system_prompt=system_prompt,
+                )
+            except DeepXivAgentError:
+                logger.warning(
+                    "[PIPELINE] Stage 1 batch at offset %d FAILED, using deterministic fallback",
+                    batch_offset,
+                )
+                # Deterministic fallback for this batch
+                theme = Theme(parsed_queries=[question])
+                works = []
+                for j, p in enumerate(batch_papers):
+                    works.append(Work(
+                        title=str(p.get("title") or ""),
+                        abstract=p.get("abstract"),
+                        authors=list(p.get("authors") or []),
+                        year=p.get("year") if isinstance(p.get("year"), int) else None,
+                        venue=p.get("venue"),
+                        citation_count=max(0, p.get("citation_count") or 0) if isinstance(p.get("citation_count"), int) else 0,
+                        source_provenance=["stage1_fallback"],
+                    ))
+                ranked = rank_papers(works, theme)
+                results = []
+                for rank, w in enumerate(ranked):
+                    results.append({
+                        "index": j,
+                        "relevance": 5.0,
+                        "recency": 5.0,
+                        "novelty": 5.0,
+                        "quality": 5.0,
+                        "reason": "stage1_deterministic_fallback",
+                    })
+                    # Find original j for this work
+                    for jj, p in enumerate(batch_papers):
+                        if p.get("title") == w.title:
+                            results[-1]["index"] = jj
+                            break
+            finally:
+                await agent.close()
+
+        # Map local batch indices to global indices
+        scored = _compute_stage1_scores(results)
+        for item in scored:
+            item["original_index"] = batch_offset + item["index"]
+        return scored
+
+    # Run all batches with concurrency control
+    retry_queue: list[tuple[int, list[dict[str, Any]]]] = list(batches)
+    all_scored: list[dict[str, Any]] = []
+    stage1_success = True
+
+    for retry_round in range(settings.stage1_max_retries + 1):
+        if not retry_queue:
+            break
+        tasks = [_score_batch(offset, papers) for offset, papers in retry_queue]
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        next_retry: list[tuple[int, list[dict[str, Any]]]] = []
+        for (offset, papers), result in zip(retry_queue, batch_results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "[PIPELINE] Stage 1 batch at offset %d failed (round %d): %s",
+                    offset, retry_round, result,
+                )
+                if retry_round < settings.stage1_max_retries:
+                    next_retry.append((offset, papers))
+                else:
+                    stage1_success = False
+                    # Final fallback: assign low scores
+                    for j in range(len(papers)):
+                        all_scored.append({
+                            "original_index": offset + j,
+                            "agent_score": 1.0,
+                            "agent_rationale": "stage1_batch_failed",
+                        })
+            else:
+                all_scored.extend(result)
+
+        retry_queue = next_retry
+
+    # Per-batch top-K selection, then global sort
+    batch_top_k: list[dict[str, Any]] = []
+    for i in range(0, len(paper_dicts), batch_size):
+        batch_items = [
+            item for item in all_scored
+            if i <= item["original_index"] < i + batch_size
+        ]
+        batch_items.sort(key=lambda x: -x["agent_score"])
+        batch_top_k.extend(batch_items[:K])
+
+    batch_top_k.sort(key=lambda x: -x["agent_score"])
+    logger.info(
+        "[PIPELINE] Stage 1 done: %d scored, %d top-K candidates, success=%s",
+        len(all_scored), len(batch_top_k), stage1_success,
+    )
+    return batch_top_k, stage1_success
+
+
+async def _run_stage2_selection(
+    candidates: list[dict[str, Any]],
+    paper_dicts: list[dict[str, Any]],
+    question: str,
+    settings: Settings,
+    final_limit: int,
+) -> list[dict[str, Any]] | None:
+    """Stage 2: use glm-5-turbo with 128K context for final comparative selection.
+
+    Returns reranked list of dicts with index (global), selected, agent_score, etc.
+    Returns None if Stage 2 fails entirely.
+    """
+    # Collect the actual paper dicts for Stage 2 candidates
+    stage2_papers: list[dict[str, Any]] = []
+    index_map: list[int] = []  # maps stage2 local index → original paper_dicts index
+    for candidate in candidates:
+        orig_idx = candidate["original_index"]
+        if 0 <= orig_idx < len(paper_dicts):
+            stage2_papers.append(paper_dicts[orig_idx])
+            index_map.append(orig_idx)
+
+    if not stage2_papers:
+        return None
+
+    system_prompt = DeepXivAgent.build_stage2_prompt(max_select=final_limit)
+    max_ctx = settings.stage2_max_context_tokens
+
+    # Check if all candidates fit in one call
+    estimated_tokens = _estimate_papers_tokens(stage2_papers, question, system_prompt)
+
+    if estimated_tokens <= max_ctx:
+        # Single call
+        return await _stage2_single_call(
+            stage2_papers, index_map, question, system_prompt, settings, final_limit,
+        )
+
+    # Split into multiple calls, then merge
+    logger.info(
+        "[PIPELINE] Stage 2: %d papers (%d est tokens) > %d limit, splitting",
+        len(stage2_papers), estimated_tokens, max_ctx,
+    )
+    # Binary search for split point
+    batches = _split_papers_for_stage2(stage2_papers, question, system_prompt, max_ctx)
+    all_selections: list[dict[str, Any]] = []
+
+    for batch_offset, batch_papers in batches:
+        batch_index_map = index_map[batch_offset:batch_offset + len(batch_papers)]
+        result = await _stage2_single_call(
+            batch_papers, batch_index_map, question, system_prompt, settings, final_limit,
+        )
+        if result is not None:
+            all_selections.extend(result)
+
+    if not all_selections:
+        return None
+
+    # Merge: deduplicate by original_index, sort by final_rank
+    seen: set[int] = set()
+    merged: list[dict[str, Any]] = []
+    for item in all_selections:
+        if item.get("original_index") not in seen:
+            seen.add(item["original_index"])
+            merged.append(item)
+
+    merged.sort(key=lambda x: (x.get("final_rank") or 999))
+    return merged[:final_limit]
+
+
+def _split_papers_for_stage2(
+    papers: list[dict[str, Any]],
+    question: str,
+    system_prompt: str,
+    max_tokens: int,
+) -> list[tuple[int, list[dict[str, Any]]]]:
+    """Split papers into batches that fit within token limits."""
+    budget = DEFAULT_PROMPT_BUDGET
+    fixed_cost = budget.estimate_messages([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+    ])
+    available = max_tokens - fixed_cost
+    if available <= 0:
+        # Can't even fit the prompt, use single paper batches
+        return [(i, [p]) for i, p in enumerate(papers)]
+
+    batches: list[tuple[int, list[dict[str, Any]]]] = []
+    current: list[dict[str, Any]] = []
+    current_tokens = 0
+    offset = 0
+
+    for i, paper in enumerate(papers):
+        paper_tokens = budget.estimate_text(DeepXivAgent.paper_snippet(paper))
+        if current and current_tokens + paper_tokens > available:
+            batches.append((offset, current))
+            offset = i
+            current = [paper]
+            current_tokens = paper_tokens
+        else:
+            current.append(paper)
+            current_tokens += paper_tokens
+
+    if current:
+        batches.append((offset, current))
+    return batches
+
+
+async def _stage2_single_call(
+    papers: list[dict[str, Any]],
+    index_map: list[int],
+    question: str,
+    system_prompt: str,
+    settings: Settings,
+    final_limit: int,
+) -> list[dict[str, Any]] | None:
+    """Execute a single Stage 2 LLM call."""
+    agent = DeepXivAgent(
+        api_key=settings.bigmodel_api_key,
+        base_url=settings.bigmodel_base_url,
+        model=settings.stage2_model,
+        backend="glm",
+        request_timeout_seconds=settings.deepxiv_agent_http_timeout_seconds,
+        total_timeout_seconds=None,
+        max_retries=1,
+        retry_backoff_seconds=settings.deepxiv_agent_retry_backoff_seconds,
+    )
+    try:
+        results = await agent.select_papers(
+            papers,
+            question,
+            max_select=final_limit,
+            system_prompt=system_prompt,
+        )
+    except DeepXivAgentError as exc:
+        logger.warning("[PIPELINE] Stage 2 call FAILED: %s", exc)
+        return None
+    finally:
+        await agent.close()
+
+    # Convert Stage 2 results to reranked format with global indices
+    reranked: list[dict[str, Any]] = []
+    for result in results:
+        local_idx = result.get("index")
+        if not isinstance(local_idx, int) or not (0 <= local_idx < len(index_map)):
+            continue
+        selected = bool(result.get("selected"))
+        relevance = float(result.get("relevance", 0) or 0)
+        final_rank = result.get("final_rank")
+        reranked.append({
+            "original_index": index_map[local_idx],
+            "selected": selected,
+            "agent_score": relevance + (10 - (final_rank or 20)) * 0.5,
+            "agent_rationale": result.get("reason", ""),
+            "agent_rank": final_rank,
+            "final_rank": final_rank,
+        })
+    return reranked
+
+
+async def _run_two_stage_pipeline(
+    *,
+    theme: Theme,
+    theme_description: str,
+    agent_candidates: list[Work],
+    paper_dicts: list[dict[str, Any]],
+    total_retrieved: int,
+    total_after_dedup: int,
+    total_after_first_stage: int,
+    requested_final: int,
+    storage: StorageService,
+    settings: Settings,
+    pipeline_start: float,
+) -> QueryPipelineResult:
+    """Execute the two-stage pipeline: distributed scoring + centralized selection."""
+    logger.info(
+        "[PIPELINE] === TWO-STAGE pipeline: %d candidates, final=%d ===",
+        len(paper_dicts), requested_final,
+    )
+
+    # --- Stage 1: Distributed scoring with glm-4.6 ---
+    stage1_start = time.monotonic()
+    top_candidates, stage1_ok = await _run_stage1_scoring(
+        paper_dicts, theme_description, settings, requested_final,
+    )
+    logger.info(
+        "[PIPELINE] Stage 1 done in %.2fs: %d candidates, ok=%s",
+        time.monotonic() - stage1_start, len(top_candidates), stage1_ok,
+    )
+
+    if not top_candidates:
+        saved = storage.replace_theme_results(theme.id, [])
+        return QueryPipelineResult(
+            theme=theme,
+            total_retrieved=total_retrieved,
+            total_after_dedup=total_after_dedup,
+            total_after_first_stage=total_after_first_stage,
+            total_agent_candidates=len(agent_candidates),
+            total_final=0,
+            works=saved,
+        )
+
+    # --- Stage 2: Centralized selection with glm-5-turbo ---
+    stage2_start = time.monotonic()
+    reranked = await _run_stage2_selection(
+        top_candidates, paper_dicts, theme_description, settings, requested_final,
+    )
+    logger.info(
+        "[PIPELINE] Stage 2 done in %.2fs: reranked=%s",
+        time.monotonic() - stage2_start,
+        len(reranked) if reranked else "None",
+    )
+
+    # If Stage 2 failed, use Stage 1 scores directly
+    if reranked is None:
+        logger.warning("[PIPELINE] Stage 2 FAILED; using Stage 1 scores directly")
+        reranked = [
+            {
+                "original_index": c["original_index"],
+                "selected": True,
+                "agent_score": c["agent_score"],
+                "agent_rationale": c.get("agent_rationale", ""),
+            }
+            for c in top_candidates[:requested_final]
+        ]
+
+    # Convert reranked results to final works
+    scored_works: list[Work] = []
+    selected_works: list[Work] = []
+
+    for item in reranked:
+        orig_idx = item.get("original_index")
+        if not isinstance(orig_idx, int) or not (0 <= orig_idx < len(agent_candidates)):
+            continue
+        work = _annotated_work(agent_candidates[orig_idx], item)
+        scored_works.append(work)
+        if item.get("selected"):
+            selected_works.append(work)
+
+    # If nothing selected, use top-scored
+    if not selected_works:
+        logger.warning("[PIPELINE] Two-stage: nothing selected, using top-scored")
+        selected_works = scored_works[:max(1, settings.deepxiv_agent_fallback_top_k)]
+    elif len(selected_works) < requested_final:
+        # Supplement with scored works
+        selected_ids = {id(w) for w in selected_works}
+        fill = [w for w in scored_works if id(w) not in selected_ids]
+        fill_count = min(len(fill), requested_final - len(selected_works))
+        if fill_count > 0:
+            selected_works = selected_works + fill[:fill_count]
+
+    final_works = selected_works[:max(1, requested_final)]
+    saved = storage.replace_theme_results(theme.id, final_works)
+    logger.info(
+        "[PIPELINE] === TWO-STAGE DONE in %.2fs === theme=%s final=%d papers",
+        time.monotonic() - pipeline_start, theme.id, len(saved),
+    )
+    return QueryPipelineResult(
+        theme=theme,
+        total_retrieved=total_retrieved,
+        total_after_dedup=total_after_dedup,
+        total_after_first_stage=total_after_first_stage,
+        total_agent_candidates=len(agent_candidates),
+        total_final=len(saved),
+        works=saved,
+    )
+
+
 def _annotated_work(work: Work, rerank: dict[str, Any]) -> Work:
     annotated = work.model_copy(deep=True)
     annotated.agent_score = float(rerank.get("agent_score", 0.0) or 0.0)
@@ -273,6 +732,23 @@ async def run_query_pipeline(
         else theme.document_text
     )
 
+    # --- Two-stage pipeline branch ---
+    if resolved.two_stage_enabled:
+        return await _run_two_stage_pipeline(
+            theme=theme,
+            theme_description=theme_description,
+            agent_candidates=agent_candidates,
+            paper_dicts=paper_dicts,
+            total_retrieved=total_retrieved,
+            total_after_dedup=total_after_dedup,
+            total_after_first_stage=total_after_first_stage,
+            requested_final=requested_final,
+            storage=storage,
+            settings=resolved,
+            pipeline_start=pipeline_start,
+        )
+
+    # --- Original single-stage pipeline (below) ---
     # Build model chain: GLM primary → GLM fallbacks → DeepSeek → Qwen
     model_chain: list[dict[str, Any]] = []
 

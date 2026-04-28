@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1/chat/completions"
     deepseek_model: str = "deepseek-chat"
 
+    # --- Two-stage pipeline ---
+    two_stage_enabled: bool = False
+    stage1_model: str = "glm-4.6"
+    stage1_batch_size: int = 10
+    stage1_concurrency: int = 20
+    stage1_max_retries: int = 2
+    stage2_model: str = "glm-5-turbo"
+    stage2_max_context_tokens: int = 100_000
+
     # --- DeepXiv agent robustness ---
     deepxiv_agent_http_timeout_seconds: float = 5.0
     deepxiv_agent_total_timeout_seconds: float = 120.0
