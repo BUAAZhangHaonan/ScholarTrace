@@ -53,8 +53,10 @@ class Settings(BaseSettings):
     qwen_base_url: str = "http://10.134.87.107:8000/v1/chat/completions"
     qwen_model: str = "Qwen/Qwen3.5-27B-GPTQ-Int4"
 
-    # --- Model chain timeout ---
-    model_timeout_seconds: float = 5.0
+    # --- Retrieval timeout & retry ---
+    retrieval_connector_timeout_seconds: float = 45.0   # per-connector timeout in fan-out
+    retrieval_query_max_retries: int = 1                # retry count for failed queries
+    retrieval_total_timeout_seconds: float = 300.0      # overall retrieval stage timeout
 
     # --- DeepSeek settings ---
     deepseek_api_key: str = ""
@@ -64,6 +66,7 @@ class Settings(BaseSettings):
     # --- Agent global selection ---
     stage2_model: str = "glm-5-turbo"
     stage2_max_context_tokens: int = 100_000
+    agent_total_timeout_seconds: float = 180.0      # MCP path agent stage timeout
 
     # --- Model pool ---
     glm_primary_max_concurrent: int = 5       # glm-5-turbo
