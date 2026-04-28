@@ -732,6 +732,19 @@ async def run_query_pipeline(
         else theme.document_text
     )
 
+    # Build paper dicts for agent (used by both single-stage and two-stage)
+    paper_dicts = [
+        {
+            "title": work.title,
+            "abstract": work.abstract or "",
+            "authors": work.authors,
+            "year": work.year,
+            "venue": work.venue,
+            "citation_count": work.citation_count,
+        }
+        for work in agent_candidates
+    ]
+
     # --- Two-stage pipeline branch ---
     if resolved.two_stage_enabled:
         return await _run_two_stage_pipeline(
@@ -784,18 +797,6 @@ async def run_query_pipeline(
             "api_key": resolved.qwen_api_key,
             "base_url": resolved.qwen_base_url,
         })
-
-    paper_dicts = [
-        {
-            "title": work.title,
-            "abstract": work.abstract or "",
-            "authors": work.authors,
-            "year": work.year,
-            "venue": work.venue,
-            "citation_count": work.citation_count,
-        }
-        for work in agent_candidates
-    ]
 
     def _collect_reranked_works(
         reranked_items: list[dict[str, Any]],
