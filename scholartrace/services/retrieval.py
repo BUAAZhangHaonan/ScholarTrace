@@ -253,9 +253,26 @@ async def _fan_out_query(
     connectors: list[BaseConnector],
     query: str,
     max_results: int,
+    *,
+    connector_timeout: float = 45.0,
 ) -> list[RawCandidate]:
-    """Run one query against all connectors concurrently, tolerating individual failures."""
-    tasks = [c.search(query, max_results=max_results) for c in connectors]
+    """Run one query against all connectors concurrently, tolerating individual failures.
+
+    Each connector is wrapped with *connector_timeout* so a slow source cannot
+    block the entire retrieval.
+    """
+    async def _safe_search(connector: BaseConnector) -> list[RawCandidate]:
+        try:
+            return await asyncio.wait_for(
+                connector.search(query, max_results=max_results),
+                timeout=connector_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"{connector.source_name} timed out after {connector_timeout:.0f}s"
+            )
+
+    tasks = [_safe_search(c) for c in connectors]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     candidates: list[RawCandidate] = []
@@ -277,36 +294,52 @@ async def _collect_ranked_works(
     storage: StorageService,
     settings: Settings,
 ) -> tuple[list[Work], int, int]:
-    connectors = _build_connectors(settings)
-    try:
-        storage.save_theme(theme)
+    max_attempts = 1 + max(0, settings.retrieval_query_max_retries)
 
-        all_candidates: list[RawCandidate] = []
-        for query in theme.parsed_queries:
-            query_candidates = await _fan_out_query(
-                connectors,
-                query,
-                settings.max_results_per_source_per_query,
+    for attempt in range(max_attempts):
+        connectors = _build_connectors(settings)
+        try:
+            if attempt == 0:
+                storage.save_theme(theme)
+
+            all_candidates: list[RawCandidate] = []
+            for query in theme.parsed_queries:
+                query_candidates = await _fan_out_query(
+                    connectors,
+                    query,
+                    settings.max_results_per_source_per_query,
+                    connector_timeout=settings.retrieval_connector_timeout_seconds,
+                )
+                all_candidates.extend(query_candidates)
+
+            if not all_candidates and attempt < max_attempts - 1:
+                logger.warning(
+                    "[PIPELINE] All connectors returned 0 candidates (attempt %d/%d), retrying",
+                    attempt + 1, max_attempts,
+                )
+                continue
+
+            logger.info(
+                "[PIPELINE] Collected %d raw candidates across %d queries",
+                len(all_candidates),
+                len(theme.parsed_queries),
             )
-            all_candidates.extend(query_candidates)
 
-        logger.info(
-            "Collected %d raw candidates across %d queries",
-            len(all_candidates),
-            len(theme.parsed_queries),
-        )
+            deduped = deduplicate_candidates(all_candidates)
+            logger.info("[PIPELINE] After dedup: %d candidates", len(deduped))
 
-        deduped = deduplicate_candidates(all_candidates)
-        logger.info("After dedup: %d candidates", len(deduped))
+            works = [_candidate_to_work(candidate) for candidate in deduped]
+            ranked = rank_papers(works, theme)
+            return ranked, len(all_candidates), len(deduped)
+        finally:
+            await asyncio.gather(
+                *[connector.close() for connector in connectors],
+                return_exceptions=True,
+            )
 
-        works = [_candidate_to_work(candidate) for candidate in deduped]
-        ranked = rank_papers(works, theme)
-        return ranked, len(all_candidates), len(deduped)
-    finally:
-        await asyncio.gather(
-            *[connector.close() for connector in connectors],
-            return_exceptions=True,
-        )
+    # All retries exhausted — return empty
+    logger.warning("[PIPELINE] All retrieval attempts exhausted, returning empty")
+    return [], 0, 0
 
 
 def _estimate_papers_tokens(
@@ -417,11 +450,12 @@ async def run_query_pipeline(
     # --- Stage 1: Retrieval ---
     retrieval_start = time.monotonic()
     try:
-        ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
-            theme,
-            storage,
-            resolved,
-        )
+        async with asyncio.timeout(resolved.retrieval_total_timeout_seconds):
+            ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
+                theme,
+                storage,
+                resolved,
+            )
         logger.info(
             "[PIPELINE] Retrieval done in %.2fs: raw=%d dedup=%d ranked=%d",
             time.monotonic() - retrieval_start,
