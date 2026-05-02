@@ -20,7 +20,7 @@ from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
 from scholartrace.deepxiv.agent import DeepXivAgent, DeepXivAgentError
 from scholartrace.models.schemas import RawCandidate, Theme, Work
 from scholartrace.services.dedup import deduplicate_candidates
-from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET
+from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET, PromptBudget
 from scholartrace.services.ranking import rank_papers
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
@@ -334,14 +334,23 @@ async def _collect_ranked_works(
 
             all_candidates: list[RawCandidate] = []
             with timer.stage("all_queries_fan_out"):
-                for query in theme.parsed_queries:
-                    query_candidates = await _fan_out_query(
-                        connectors,
-                        query,
-                        settings.max_results_per_source_per_query,
-                        connector_timeout=settings.retrieval_connector_timeout_seconds,
-                    )
-                    all_candidates.extend(query_candidates)
+                query_results = await asyncio.gather(
+                    *[
+                        _fan_out_query(
+                            connectors,
+                            query,
+                            settings.max_results_per_source_per_query,
+                            connector_timeout=settings.retrieval_connector_timeout_seconds,
+                        )
+                        for query in theme.parsed_queries
+                    ],
+                    return_exceptions=True,
+                )
+                for result in query_results:
+                    if isinstance(result, Exception):
+                        logger.warning("Query fan-out failed: %s", result)
+                        continue
+                    all_candidates.extend(result)
 
             if not all_candidates and attempt < max_attempts - 1:
                 logger.warning(
@@ -392,6 +401,113 @@ def _estimate_papers_tokens(
         for p in papers
     )
     return fixed_cost + paper_cost
+
+
+def _get_model_context_tokens(entry: ModelPoolEntry, settings: Settings) -> int:
+    """Return the context window size for a given model pool entry."""
+    if entry.backend == "deepseek" and settings.model_path == "deepseek_flash":
+        return 1_000_000
+    if entry.backend == "glm":
+        if "4.6" in entry.model:
+            return 200_000
+        if "4.5" in entry.model:
+            return 128_000
+        return 128_000  # glm-5-turbo and other GLM models
+    if entry.backend == "deepseek":
+        return 128_000
+    if entry.backend == "qwen":
+        return 32_768
+    return 128_000
+
+
+async def _batched_select_papers(
+    agent: DeepXivAgent,
+    paper_dicts: list[dict[str, Any]],
+    theme_description: str,
+    system_prompt: str,
+    context_tokens: int,
+    requested_final: int,
+    timer: PipelineTimer,
+) -> list[dict[str, Any]]:
+    """Select papers using batched LLM calls if papers exceed context window.
+
+    For models with large context (e.g. deepseek_flash 1M), fits everything
+    in a single call.  For smaller context windows, splits papers into
+    batches, calls select_papers() per batch, then merges results.
+    """
+    budget = PromptBudget(model_context_tokens=context_tokens)
+
+    # Estimate each paper's snippet cost
+    snippets = [DeepXivAgent.paper_snippet(p, budget) for p in paper_dicts]
+    fixed_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Research Question: {theme_description}\n\nPapers:\n"},
+    ]
+    batches = budget.pack_items(
+        snippets,
+        fixed_messages=fixed_messages,
+        prefix=f"Research Question: {theme_description}\n\nPapers:\n",
+        separator="\n",
+    )
+
+    if len(batches) <= 1:
+        # Single batch — direct call, no index adjustment needed
+        with timer.stage("select_papers(single_batch)"):
+            return await agent.select_papers(
+                paper_dicts, theme_description,
+                max_select=requested_final,
+                system_prompt=system_prompt,
+            )
+
+    # Multiple batches — call per batch, adjust indices, merge
+    logger.info(
+        "[PIPELINE] Batching %d papers into %d calls (context=%dK)",
+        len(paper_dicts), len(batches), context_tokens // 1000,
+    )
+    merged: dict[int, dict[str, Any]] = {}  # original_index -> result
+    offset = 0  # running index into original paper_dicts
+
+    for batch_idx, batch in enumerate(batches):
+        batch_size = len(batch)
+        batch_papers = paper_dicts[offset : offset + batch_size]
+        offset += batch_size
+
+        if not batch_papers:
+            continue
+
+        per_batch_select = max(1, requested_final // len(batches) + 2)
+        with timer.stage(f"select_papers(batch_{batch_idx+1}/{len(batches)})"):
+            try:
+                batch_results = await agent.select_papers(
+                    batch_papers, theme_description,
+                    max_select=per_batch_select,
+                    system_prompt=system_prompt,
+                )
+            except (DeepXivAgentError, Exception) as exc:
+                logger.warning(
+                    "[PIPELINE] Batch %d/%d failed: %s",
+                    batch_idx + 1, len(batches), exc,
+                )
+                continue
+
+        # Adjust indices back to original paper_dicts
+        batch_offset = offset - batch_size
+        for item in batch_results:
+            batch_local_idx = item.get("index")
+            if not isinstance(batch_local_idx, int) or batch_local_idx >= batch_size:
+                continue
+            orig_idx = batch_offset + batch_local_idx
+            item["index"] = orig_idx
+            # Keep highest relevance if same paper appears in multiple batches
+            if orig_idx in merged:
+                old_rel = float(merged[orig_idx].get("relevance", 0) or 0)
+                new_rel = float(item.get("relevance", 0) or 0)
+                if new_rel > old_rel:
+                    merged[orig_idx] = item
+            else:
+                merged[orig_idx] = item
+
+    return list(merged.values())
 
 
 def _collect_selection_works(
@@ -550,7 +666,7 @@ async def run_query_pipeline(
         for work in agent_candidates
     ]
 
-    # --- Agent refinement: single-call select_papers() via ModelPool ---
+    # --- Agent refinement: batched select_papers() via ModelPool ---
     pool = ModelPool.get(resolved)
     system_prompt = DeepXivAgent.build_stage2_prompt(max_select=requested_final)
 
@@ -578,6 +694,7 @@ async def run_query_pipeline(
                 entry.backend, entry.model, entry.in_cooldown,
             )
 
+            context_tokens = _get_model_context_tokens(entry, resolved)
             agent = DeepXivAgent(
                 api_key=entry.api_key,
                 base_url=entry.base_url,
@@ -587,16 +704,16 @@ async def run_query_pipeline(
                 total_timeout_seconds=resolved.agent_total_timeout_seconds,
                 max_retries=0,
                 retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
-                context_tokens=1_000_000 if entry.backend == "deepseek" and resolved.model_path == "deepseek_flash" else None,
+                context_tokens=context_tokens,
             )
             try:
-                with pipeline_timer.stage(f"select_papers({entry.backend}/{entry.model})"):
-                    selection_results = await agent.select_papers(
-                        paper_dicts,
-                        theme_description,
-                        max_select=requested_final,
-                        system_prompt=system_prompt,
-                    )
+                selection_results = await _batched_select_papers(
+                    agent, paper_dicts, theme_description,
+                    system_prompt=system_prompt,
+                    context_tokens=context_tokens,
+                    requested_final=requested_final,
+                    timer=pipeline_timer,
+                )
                 pool.release(entry, success=True)
                 logger.info(
                     "[PIPELINE] %s/%s SUCCEEDED, selected=%d",
