@@ -10,9 +10,9 @@ ScholarTrace takes a theme document, retrieves papers from 6+ scholarly sources,
 
 **Two MCP tools**: `query` (search & rank) and `read` (layered paper access).
 
-**Pipeline**: theme parsing → multi-source retrieval → dedup → composite scoring → ModelPool LLM rerank → final papers.
+**Pipeline**: theme parsing → parallel multi-source retrieval → async dedup/ranking → batched ModelPool LLM rerank → final papers.
 
-**Model pool**: glm-5-turbo(5) → glm-4.7(20) → glm-4.6(20) → deepseek(10) → qwen(10), with automatic failover and cooldown.
+**Model pool**: configurable via `SCHOLARTRACE_MODEL_PATH` — `deepseek_flash` (1M context, single call), `glm_extended` (glm-4.6/glm-4.5, 200K/128K), or `default` (glm-5-turbo + fallbacks + deepseek + qwen). Automatic failover and cooldown on all paths.
 
 **Sources**: OpenAlex, Semantic Scholar, arXiv, DBLP, CrossRef, OpenReview, DeepXiv (optional).
 
@@ -37,9 +37,10 @@ SCHOLARTRACE_REMOTE_ACCESS_ENABLED=true
 ### 2. Start the server
 
 ```bash
-./run_scholartrace_mcp_sse.sh        # start
+./run_scholartrace_mcp_sse.sh        # start production (port 8001)
 ./status_scholartrace_mcp_sse.sh     # check status
 ./stop_scholartrace_mcp_sse.sh       # stop
+./run_scholartrace_mcp_debug.sh      # start debug (port 8002, DEBUG logs)
 ```
 
 ### 3. Connect from ChatBox
@@ -88,24 +89,34 @@ Depths: `summary` → `sections` → `fulltext` → `direct_evidence`. Each dept
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A[theme document] --> B[parse_theme]
+    B --> C[parallel query fan-out]
+    C --> D1[OpenAlex]
+    C --> D2[Semantic Scholar]
+    C --> D3[arXiv]
+    C --> D4[DBLP]
+    C --> D5[CrossRef]
+    C --> D6[OpenReview]
+    D1 & D2 & D3 & D4 & D5 & D6 --> E[dedup]
+    E --> F[composite scoring]
+    F --> G[ModelPool agent rerank]
+    G --> H[final papers]
 ```
-theme document
-    │
-    ▼
-parse_theme (extract queries + compress summary)
-    │
-    ▼
-fan-out retrieval (6+ sources, per-connector timeout 45s, retry on 429/5xx)
-    │
-    ▼
-dedup → composite scoring (relevance + recency + influence + venue + ...)
-    │
-    ▼
-ModelPool agent rerank (multi-model failover, total timeout 180s)
-    │
-    ▼
-final papers (top 25)
+
+### Model Path Selection
+
+```mermaid
+flowchart LR
+    MP{model_path?} -->|deepseek_flash| DF[deepseek-v4-flash\n1M context\nsingle call]
+    MP -->|glm_extended| GE[glm-4.6 + glm-4.5\n200K/128K context\nbatched calls]
+    MP -->|default| DEF[glm-5-turbo + fallbacks\n+ deepseek + qwen\nbatched calls]
 ```
+
+### Agent Batching
+
+For models with limited context, papers are split into batches via `PromptBudget.pack_items()`, each batch is sent as a separate LLM call, and results are merged by relevance score. The `deepseek_flash` path with 1M context sends all papers in a single call.
 
 Flow diagrams: [`docs/architecture/pipeline_flow.md`](docs/architecture/pipeline_flow.md)
 
@@ -136,6 +147,50 @@ Design docs: [`docs/plans/`](docs/plans/)
 | `SCHOLARTRACE_RETRIEVAL_TOTAL_TIMEOUT_SECONDS` | `300` | Overall retrieval timeout |
 | `SCHOLARTRACE_AGENT_TOTAL_TIMEOUT_SECONDS` | `180` | LLM rerank timeout |
 | `SCHOLARTRACE_DEEPXIV_TOKENS` | | Optional DeepXiv tokens |
+| `SCHOLARTRACE_MODEL_PATH` | `default` | `deepseek_flash`, `glm_extended`, or `default` |
+| `SCHOLARTRACE_DEEPSEEK_FLASH_MODEL` | `deepseek-v4-flash` | Model name for deepseek_flash path |
+| `SCHOLARTRACE_DEEPSEEK_FLASH_MAX_CONCURRENT` | `10` | Concurrency for deepseek_flash |
+| `SCHOLARTRACE_GLM_EXTENDED_MODELS` | `glm-4.6,glm-4.5` | Comma-separated models for glm_extended |
+| `SCHOLARTRACE_GLM_EXTENDED_MAX_CONCURRENT` | `20` | Concurrency for glm_extended |
+
+## Performance Tuning
+
+### Model Paths
+
+Three model paths optimize for different scenarios:
+
+| Path | Context | Best for | Expected time/query |
+|------|---------|----------|-------------------|
+| `deepseek_flash` | 1M tokens | Large candidate pools, single-call | Fastest |
+| `glm_extended` | 200K/128K | Balanced cost/performance | Moderate |
+| `default` | 128K | Maximum model diversity | Baseline |
+
+### Debug Server
+
+A debug server on port 8002 runs alongside production for testing:
+
+```bash
+./run_scholartrace_mcp_debug.sh     # start debug server
+./status_scholartrace_mcp_debug.sh  # check status
+./stop_scholartrace_mcp_debug.sh    # stop
+```
+
+### Stress Testing
+
+```bash
+# Test with deepseek_flash path
+SCHOLARTRACE_MODEL_PATH=deepseek_flash python scripts/stress_test_model_paths.py
+
+# Test with glm_extended path
+SCHOLARTRACE_MODEL_PATH=glm_extended python scripts/stress_test_model_paths.py
+
+# Custom concurrency
+SCHOLARTRACE_STRESS_CONCURRENT=10 python scripts/stress_test_model_paths.py
+```
+
+### Timing Logs
+
+All pipeline stages emit `[TIMING]` log lines. Enable DEBUG level on the debug server to see detailed per-connector and per-model-call timing with percentage breakdowns.
 
 ## Deployment
 
