@@ -16,6 +16,7 @@ from scholartrace.api.security import AccessTokenMiddleware
 from scholartrace.config import Settings, get_settings
 from scholartrace.services import runtime_limits
 from scholartrace.services.storage import StorageService
+from scholartrace.services.timing import PipelineTimer
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ async def query(
         doc_preview, final_limit, agent_candidate_limit,
     )
 
+    mcp_timer = PipelineTimer("mcp_query")
     # Use semaphore for concurrency — waits in queue, never rejects.
     async with _query_semaphore:
         storage = _get_storage()
@@ -209,26 +211,30 @@ async def query(
         from scholartrace.services.fulltext import read_cached_fulltext
         from scholartrace.services.retrieval import run_query_pipeline
 
-        result = await run_query_pipeline(
-            theme_document,
-            storage,
-            settings=settings,
-            final_limit=final_limit,
-            agent_candidate_limit=agent_candidate_limit,
-            coarse_pool_limit=coarse_pool_limit,
-            include_rationale=include_rationale,
-        )
-
-        papers = [
-            _query_paper_payload(
-                result.theme.id,
-                work,
-                read_cached_fulltext(work, storage, settings),
+        with mcp_timer.stage("run_query_pipeline"):
+            result = await run_query_pipeline(
+                theme_document,
+                storage,
+                settings=settings,
+                final_limit=final_limit,
+                agent_candidate_limit=agent_candidate_limit,
+                coarse_pool_limit=coarse_pool_limit,
                 include_rationale=include_rationale,
             )
-            for work in result.works
-        ]
 
+        with mcp_timer.stage("build_payload"):
+            from scholartrace.services.fulltext import read_cached_fulltext
+            papers = [
+                _query_paper_payload(
+                    result.theme.id,
+                    work,
+                    read_cached_fulltext(work, storage, settings),
+                    include_rationale=include_rationale,
+                )
+                for work in result.works
+            ]
+
+    mcp_timer.log_summary()
     logger.info(
         "[MCP] query() done in %.2fs: %d papers returned",
         _time.monotonic() - req_start, len(papers),

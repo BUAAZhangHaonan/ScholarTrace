@@ -294,9 +294,12 @@ class DeepXivAgent:
         Retries up to max_retries times on transient errors.
         Raises DeepXivAgentError if all attempts fail.
         """
+        import time as _time
+
         content: str | None = None
         for attempt in range(self._max_retries + 1):
             try:
+                call_start = _time.monotonic()
                 resp = await self._client.post(
                     self._base_url,
                     headers={"Authorization": f"Bearer {self._api_key}"},
@@ -304,6 +307,10 @@ class DeepXivAgent:
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                logger.info(
+                    "[TIMING] LLM raw call took %.2fs (%d papers, model=%s)",
+                    _time.monotonic() - call_start, paper_count, self._model,
+                )
 
                 # Handle GLM business errors returned with HTTP 200
                 if "error" in data and "choices" not in data:

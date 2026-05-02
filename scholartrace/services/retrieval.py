@@ -24,6 +24,7 @@ from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET
 from scholartrace.services.ranking import rank_papers
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
+from scholartrace.services.timing import PipelineTimer
 
 logger = logging.getLogger(__name__)
 
@@ -261,16 +262,19 @@ async def _fan_out_query(
     Each connector is wrapped with *connector_timeout* so a slow source cannot
     block the entire retrieval.
     """
+    timer = PipelineTimer(f"fan_out_query({query[:50]})")
+
     async def _safe_search(connector: BaseConnector) -> list[RawCandidate]:
-        try:
-            return await asyncio.wait_for(
-                connector.search(query, max_results=max_results),
-                timeout=connector_timeout,
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"{connector.source_name} timed out after {connector_timeout:.0f}s"
-            )
+        with timer.stage(f"connector: {connector.source_name}"):
+            try:
+                return await asyncio.wait_for(
+                    connector.search(query, max_results=max_results),
+                    timeout=connector_timeout,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"{connector.source_name} timed out after {connector_timeout:.0f}s"
+                )
 
     tasks = [_safe_search(c) for c in connectors]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -286,6 +290,7 @@ async def _fan_out_query(
             )
             continue
         candidates.extend(result)
+    timer.log_summary()
     return candidates
 
 
@@ -295,6 +300,7 @@ async def _collect_ranked_works(
     settings: Settings,
 ) -> tuple[list[Work], int, int]:
     max_attempts = 1 + max(0, settings.retrieval_query_max_retries)
+    timer = PipelineTimer("collect_ranked_works")
 
     for attempt in range(max_attempts):
         connectors = _build_connectors(settings)
@@ -303,14 +309,15 @@ async def _collect_ranked_works(
                 storage.save_theme(theme)
 
             all_candidates: list[RawCandidate] = []
-            for query in theme.parsed_queries:
-                query_candidates = await _fan_out_query(
-                    connectors,
-                    query,
-                    settings.max_results_per_source_per_query,
-                    connector_timeout=settings.retrieval_connector_timeout_seconds,
-                )
-                all_candidates.extend(query_candidates)
+            with timer.stage("all_queries_fan_out"):
+                for query in theme.parsed_queries:
+                    query_candidates = await _fan_out_query(
+                        connectors,
+                        query,
+                        settings.max_results_per_source_per_query,
+                        connector_timeout=settings.retrieval_connector_timeout_seconds,
+                    )
+                    all_candidates.extend(query_candidates)
 
             if not all_candidates and attempt < max_attempts - 1:
                 logger.warning(
@@ -328,8 +335,10 @@ async def _collect_ranked_works(
             deduped = deduplicate_candidates(all_candidates)
             logger.info("[PIPELINE] After dedup: %d candidates", len(deduped))
 
-            works = [_candidate_to_work(candidate) for candidate in deduped]
-            ranked = rank_papers(works, theme)
+            with timer.stage("ranking"):
+                works = [_candidate_to_work(candidate) for candidate in deduped]
+                ranked = rank_papers(works, theme)
+            timer.log_summary()
             return ranked, len(all_candidates), len(deduped)
         finally:
             await asyncio.gather(
@@ -433,13 +442,15 @@ async def run_query_pipeline(
     resolved = settings or get_settings()
 
     pipeline_start = time.monotonic()
+    pipeline_timer = PipelineTimer("query_pipeline")
     logger.info(
         "[PIPELINE] === Query pipeline started === "
         "final_limit=%s agent_candidate_limit=%s coarse_pool_limit=%s",
         final_limit, agent_candidate_limit, coarse_pool_limit,
     )
 
-    theme = parse_theme(document_text)
+    with pipeline_timer.stage("parse_theme"):
+        theme = parse_theme(document_text)
     logger.info(
         "[PIPELINE] Theme parsed in %.2fs: id=%s queries=%d",
         time.monotonic() - pipeline_start,
@@ -448,34 +459,33 @@ async def run_query_pipeline(
     )
 
     # --- Stage 1: Retrieval ---
-    retrieval_start = time.monotonic()
-    try:
-        async with asyncio.timeout(resolved.retrieval_total_timeout_seconds):
-            ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
-                theme,
-                storage,
-                resolved,
+    with pipeline_timer.stage("retrieval"):
+        try:
+            async with asyncio.timeout(resolved.retrieval_total_timeout_seconds):
+                ranked, total_retrieved, total_after_dedup = await _collect_ranked_works(
+                    theme,
+                    storage,
+                    resolved,
+                )
+            logger.info(
+                "[PIPELINE] Retrieval done: raw=%d dedup=%d ranked=%d",
+                total_retrieved, total_after_dedup, len(ranked),
             )
-        logger.info(
-            "[PIPELINE] Retrieval done in %.2fs: raw=%d dedup=%d ranked=%d",
-            time.monotonic() - retrieval_start,
-            total_retrieved, total_after_dedup, len(ranked),
-        )
-    except Exception:
-        logger.exception(
-            "[PIPELINE] Retrieval FAILED in %.2fs for theme %s",
-            time.monotonic() - retrieval_start, theme.id,
-        )
-        saved = storage.replace_theme_results(theme.id, [])
-        return QueryPipelineResult(
-            theme=theme,
-            total_retrieved=0,
-            total_after_dedup=0,
-            total_after_first_stage=0,
-            total_agent_candidates=0,
-            total_final=0,
-            works=saved,
-        )
+        except Exception:
+            logger.exception(
+                "[PIPELINE] Retrieval FAILED for theme %s",
+                theme.id,
+            )
+            saved = storage.replace_theme_results(theme.id, [])
+            return QueryPipelineResult(
+                theme=theme,
+                total_retrieved=0,
+                total_after_dedup=0,
+                total_after_first_stage=0,
+                total_agent_candidates=0,
+                total_final=0,
+                works=saved,
+            )
 
     total_after_first_stage = len(ranked)
     coarse_limit = coarse_pool_limit or resolved.target_candidate_pool
@@ -520,7 +530,6 @@ async def run_query_pipeline(
     pool = ModelPool.get(resolved)
     system_prompt = DeepXivAgent.build_stage2_prompt(max_select=requested_final)
 
-    agent_start = time.monotonic()
     logger.info(
         "[PIPELINE] Agent refinement: %d papers, pool=%s",
         len(paper_dicts),
@@ -531,61 +540,61 @@ async def run_query_pipeline(
     max_attempts = len(pool.entries) * 2  # try each model up to twice
     last_error = ""
 
-    for attempt in range(max_attempts):
-        try:
-            entry = await pool.acquire(timeout=5.0)
-        except RuntimeError:
-            logger.warning("[PIPELINE] ModelPool exhausted, using deterministic fallback")
-            break
+    with pipeline_timer.stage("agent_refinement"):
+        for attempt in range(max_attempts):
+            try:
+                entry = await pool.acquire(timeout=5.0)
+            except RuntimeError:
+                logger.warning("[PIPELINE] ModelPool exhausted, using deterministic fallback")
+                break
 
-        logger.info(
-            "[PIPELINE] Attempt %d/%d: acquired %s/%s (cooldown=%s)",
-            attempt + 1, max_attempts,
-            entry.backend, entry.model, entry.in_cooldown,
-        )
-
-        agent = DeepXivAgent(
-            api_key=entry.api_key,
-            base_url=entry.base_url,
-            model=entry.model,
-            backend=entry.backend,
-            request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
-            total_timeout_seconds=resolved.agent_total_timeout_seconds,
-            max_retries=0,
-            retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
-        )
-        try:
-            selection_results = await agent.select_papers(
-                paper_dicts,
-                theme_description,
-                max_select=requested_final,
-                system_prompt=system_prompt,
-            )
-            pool.release(entry, success=True)
             logger.info(
-                "[PIPELINE] %s/%s SUCCEEDED in %.2fs, selected=%d",
-                entry.backend, entry.model,
-                time.monotonic() - agent_start,
-                len(selection_results) if selection_results else 0,
+                "[PIPELINE] Attempt %d/%d: acquired %s/%s (cooldown=%s)",
+                attempt + 1, max_attempts,
+                entry.backend, entry.model, entry.in_cooldown,
             )
-            break
-        except (DeepXivAgentError, Exception) as exc:
-            last_error = str(exc)
-            pool.release(entry, success=False)
-            logger.warning(
-                "[PIPELINE] %s/%s FAILED in %.2fs: %s",
-                entry.backend, entry.model,
-                time.monotonic() - agent_start,
-                exc,
+
+            agent = DeepXivAgent(
+                api_key=entry.api_key,
+                base_url=entry.base_url,
+                model=entry.model,
+                backend=entry.backend,
+                request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
+                total_timeout_seconds=resolved.agent_total_timeout_seconds,
+                max_retries=0,
+                retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
             )
-        finally:
-            await agent.close()
+            try:
+                with pipeline_timer.stage(f"select_papers({entry.backend}/{entry.model})"):
+                    selection_results = await agent.select_papers(
+                        paper_dicts,
+                        theme_description,
+                        max_select=requested_final,
+                        system_prompt=system_prompt,
+                    )
+                pool.release(entry, success=True)
+                logger.info(
+                    "[PIPELINE] %s/%s SUCCEEDED, selected=%d",
+                    entry.backend, entry.model,
+                    len(selection_results) if selection_results else 0,
+                )
+                break
+            except (DeepXivAgentError, Exception) as exc:
+                last_error = str(exc)
+                pool.release(entry, success=False)
+                logger.warning(
+                    "[PIPELINE] %s/%s FAILED: %s",
+                    entry.backend, entry.model,
+                    exc,
+                )
+            finally:
+                await agent.close()
 
     # Deterministic fallback if all model attempts failed
     if selection_results is None:
         logger.warning(
-            "[PIPELINE] ALL models FAILED in %.2fs; deterministic fallback. Last error: %s",
-            time.monotonic() - agent_start, last_error,
+            "[PIPELINE] ALL models FAILED; deterministic fallback. Last error: %s",
+            last_error,
         )
         fallback_agent = DeepXivAgent(
             api_key="",
@@ -631,7 +640,9 @@ async def run_query_pipeline(
             selected = selected + fill[:fill_count]
 
     final_works = selected[: max(1, requested_final)]
-    saved = storage.replace_theme_results(theme.id, final_works)
+    with pipeline_timer.stage("storage_save"):
+        saved = storage.replace_theme_results(theme.id, final_works)
+    pipeline_timer.log_summary()
     logger.info(
         "[PIPELINE] === DONE in %.2fs total === theme=%s final=%d papers",
         time.monotonic() - pipeline_start,
