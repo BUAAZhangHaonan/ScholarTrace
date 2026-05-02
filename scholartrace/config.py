@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     qwen_max_concurrent: int = 10             # qwen
     model_pool_cooldown_seconds: float = 60.0  # cooldown after model error
 
+    # --- Model path selection ---
+    # "default": glm-5-turbo + fallbacks + deepseek + qwen (current behavior)
+    # "deepseek_flash": deepseek-v4-flash only (1M context, single call for all papers)
+    # "glm_extended": glm-4.6 + glm-4.5 pool (200K/128K context)
+    model_path: str = "default"
+    deepseek_flash_model: str = "deepseek-v4-flash"
+    deepseek_flash_max_concurrent: int = 10
+    glm_extended_models: str = "glm-4.6,glm-4.5"
+    glm_extended_max_concurrent: int = 20
+
     # --- DeepXiv agent robustness ---
     deepxiv_agent_http_timeout_seconds: float = 5.0
     deepxiv_agent_total_timeout_seconds: float = 120.0

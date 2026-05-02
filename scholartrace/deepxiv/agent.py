@@ -117,9 +117,13 @@ Return ONLY the JSON array, no other text."""
 _DEFAULT_BATCH_SIZE = 10
 _FALLBACK_BATCH_SIZE = 5
 _SINGLE_PAPER_BATCH_SIZE = 1
-_GLM_MAX_TOKENS = 128_000
-_QWEN_MAX_TOKENS = 32_768
-_DEEPSEEK_MAX_TOKENS = 128_000
+
+# Default max_tokens per backend (can be overridden via constructor)
+_DEFAULT_BACKEND_TOKENS: dict[str, int] = {
+    "glm": 128_000,
+    "deepseek": 128_000,
+    "qwen": 32_768,
+}
 
 
 class DeepXivAgentError(RuntimeError):
@@ -161,11 +165,13 @@ class DeepXivAgent:
         retry_backoff_seconds: float = 2.0,
         batch_size: int = _DEFAULT_BATCH_SIZE,
         fallback_top_k: int = 20,
+        context_tokens: int | None = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
         self._backend = backend
+        self._context_tokens = context_tokens or _DEFAULT_BACKEND_TOKENS.get(backend, 128_000)
         self._max_fulltext = max_fulltext
         self._prompt_budget = prompt_budget
         self._request_timeout_seconds = max(1.0, request_timeout_seconds)
@@ -261,7 +267,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": _QWEN_MAX_TOKENS,
+                "max_tokens": self._context_tokens,
                 "temperature": 0.3,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -272,7 +278,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": _DEEPSEEK_MAX_TOKENS,
+                "max_tokens": self._context_tokens,
                 "temperature": 0.3,
             }
         return {
@@ -282,7 +288,7 @@ class DeepXivAgent:
                 {"role": "user", "content": user_msg},
             ],
             "thinking": {"type": "enabled"},
-            "max_tokens": _GLM_MAX_TOKENS,
+            "max_tokens": self._context_tokens,
             "temperature": 0.3,
         }
 
@@ -732,7 +738,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": _QWEN_MAX_TOKENS,
+                "max_tokens": self._context_tokens,
                 "temperature": 0.3,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -743,7 +749,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": _DEEPSEEK_MAX_TOKENS,
+                "max_tokens": self._context_tokens,
                 "temperature": 0.3,
             }
         return {
@@ -753,7 +759,7 @@ class DeepXivAgent:
                 {"role": "user", "content": user_msg},
             ],
             "thinking": {"type": "enabled"},
-            "max_tokens": _GLM_MAX_TOKENS,
+            "max_tokens": self._context_tokens,
             "temperature": 0.3,
         }
 

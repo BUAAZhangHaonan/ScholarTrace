@@ -124,55 +124,79 @@ class ModelPool:
     @staticmethod
     def _build(settings: Settings) -> ModelPool:
         entries: list[ModelPoolEntry] = []
+        model_path = settings.model_path
 
-        # GLM primary (glm-5-turbo)
-        entries.append(ModelPoolEntry(
-            backend="glm",
-            model=settings.bigmodel_model,
-            api_key=settings.bigmodel_api_key,
-            base_url=settings.bigmodel_base_url,
-            max_concurrent=settings.glm_primary_max_concurrent,
-            semaphore=asyncio.Semaphore(settings.glm_primary_max_concurrent),
-        ))
-
-        # GLM fallback models (glm-4.7, glm-4.6, ...)
-        for model_name in settings.bigmodel_fallback_models.split(","):
-            model_name = model_name.strip()
-            if not model_name:
-                continue
-            entries.append(ModelPoolEntry(
-                backend="glm",
-                model=model_name,
-                api_key=settings.bigmodel_api_key,
-                base_url=settings.bigmodel_base_url,
-                max_concurrent=settings.glm_fallback_max_concurrent,
-                semaphore=asyncio.Semaphore(settings.glm_fallback_max_concurrent),
-            ))
-
-        # DeepSeek
-        if settings.deepseek_api_key.strip():
+        if model_path == "deepseek_flash":
+            # DeepSeek Flash path: single model with 1M context
             entries.append(ModelPoolEntry(
                 backend="deepseek",
-                model=settings.deepseek_model,
+                model=settings.deepseek_flash_model,
                 api_key=settings.deepseek_api_key,
                 base_url=settings.deepseek_base_url,
-                max_concurrent=settings.deepseek_max_concurrent,
-                semaphore=asyncio.Semaphore(settings.deepseek_max_concurrent),
+                max_concurrent=settings.deepseek_flash_max_concurrent,
+                semaphore=asyncio.Semaphore(settings.deepseek_flash_max_concurrent),
+            ))
+        elif model_path == "glm_extended":
+            # GLM Extended path: glm-4.6 + glm-4.5 pool
+            for model_name in settings.glm_extended_models.split(","):
+                model_name = model_name.strip()
+                if not model_name:
+                    continue
+                entries.append(ModelPoolEntry(
+                    backend="glm",
+                    model=model_name,
+                    api_key=settings.bigmodel_api_key,
+                    base_url=settings.bigmodel_base_url,
+                    max_concurrent=settings.glm_extended_max_concurrent,
+                    semaphore=asyncio.Semaphore(settings.glm_extended_max_concurrent),
+                ))
+        else:
+            # Default path: glm-5-turbo primary + fallbacks + deepseek + qwen
+            entries.append(ModelPoolEntry(
+                backend="glm",
+                model=settings.bigmodel_model,
+                api_key=settings.bigmodel_api_key,
+                base_url=settings.bigmodel_base_url,
+                max_concurrent=settings.glm_primary_max_concurrent,
+                semaphore=asyncio.Semaphore(settings.glm_primary_max_concurrent),
             ))
 
-        # Local Qwen
-        if settings.qwen_base_url.strip():
-            entries.append(ModelPoolEntry(
-                backend="qwen",
-                model=settings.qwen_model,
-                api_key=settings.qwen_api_key,
-                base_url=settings.qwen_base_url,
-                max_concurrent=settings.qwen_max_concurrent,
-                semaphore=asyncio.Semaphore(settings.qwen_max_concurrent),
-            ))
+            for model_name in settings.bigmodel_fallback_models.split(","):
+                model_name = model_name.strip()
+                if not model_name:
+                    continue
+                entries.append(ModelPoolEntry(
+                    backend="glm",
+                    model=model_name,
+                    api_key=settings.bigmodel_api_key,
+                    base_url=settings.bigmodel_base_url,
+                    max_concurrent=settings.glm_fallback_max_concurrent,
+                    semaphore=asyncio.Semaphore(settings.glm_fallback_max_concurrent),
+                ))
+
+            if settings.deepseek_api_key.strip():
+                entries.append(ModelPoolEntry(
+                    backend="deepseek",
+                    model=settings.deepseek_model,
+                    api_key=settings.deepseek_api_key,
+                    base_url=settings.deepseek_base_url,
+                    max_concurrent=settings.deepseek_max_concurrent,
+                    semaphore=asyncio.Semaphore(settings.deepseek_max_concurrent),
+                ))
+
+            if settings.qwen_base_url.strip():
+                entries.append(ModelPoolEntry(
+                    backend="qwen",
+                    model=settings.qwen_model,
+                    api_key=settings.qwen_api_key,
+                    base_url=settings.qwen_base_url,
+                    max_concurrent=settings.qwen_max_concurrent,
+                    semaphore=asyncio.Semaphore(settings.qwen_max_concurrent),
+                ))
 
         logger.info(
-            "[PIPELINE] ModelPool initialised with %d models: %s",
+            "[PIPELINE] ModelPool initialised (path=%s) with %d models: %s",
+            model_path,
             len(entries),
             ", ".join(f"{e.model}({e.max_concurrent})" for e in entries),
         )
@@ -563,6 +587,7 @@ async def run_query_pipeline(
                 total_timeout_seconds=resolved.agent_total_timeout_seconds,
                 max_retries=0,
                 retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
+                context_tokens=1_000_000 if entry.backend == "deepseek" and resolved.model_path == "deepseek_flash" else None,
             )
             try:
                 with pipeline_timer.stage(f"select_papers({entry.backend}/{entry.model})"):
