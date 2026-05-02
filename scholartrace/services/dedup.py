@@ -7,11 +7,16 @@ candidates. Merges each group into the richest single candidate.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from rapidfuzz import fuzz
 
 from scholartrace.models.schemas import RawCandidate, SourceName
+
+_DEDUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dedup")
 
 
 class UnionFind:
@@ -175,3 +180,14 @@ def deduplicate_candidates(candidates: list[RawCandidate]) -> list[RawCandidate]
         results.append(_merge_group(group_candidates))
 
     return results
+
+
+async def deduplicate_candidates_async(
+    candidates: list[RawCandidate],
+) -> list[RawCandidate]:
+    """Async wrapper that runs dedup in a thread pool to avoid blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _DEDUP_EXECUTOR,
+        partial(deduplicate_candidates, candidates),
+    )

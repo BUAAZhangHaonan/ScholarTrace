@@ -19,9 +19,9 @@ from scholartrace.connectors.openreview import OpenReviewConnector
 from scholartrace.connectors.semantic_scholar import SemanticScholarConnector
 from scholartrace.deepxiv.agent import DeepXivAgent, DeepXivAgentError
 from scholartrace.models.schemas import RawCandidate, Theme, Work
-from scholartrace.services.dedup import deduplicate_candidates
+from scholartrace.services.dedup import deduplicate_candidates_async
 from scholartrace.services.prompt_budget import DEFAULT_PROMPT_BUDGET, PromptBudget
-from scholartrace.services.ranking import rank_papers
+from scholartrace.services.ranking import rank_papers_async
 from scholartrace.services.storage import StorageService
 from scholartrace.services.theme_parser import parse_theme
 from scholartrace.services.timing import PipelineTimer
@@ -365,12 +365,12 @@ async def _collect_ranked_works(
                 len(theme.parsed_queries),
             )
 
-            deduped = deduplicate_candidates(all_candidates)
+            deduped = await deduplicate_candidates_async(all_candidates)
             logger.info("[PIPELINE] After dedup: %d candidates", len(deduped))
 
             with timer.stage("ranking"):
                 works = [_candidate_to_work(candidate) for candidate in deduped]
-                ranked = rank_papers(works, theme)
+                ranked = await rank_papers_async(works, theme)
             timer.log_summary()
             return ranked, len(all_candidates), len(deduped)
         finally:

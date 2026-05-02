@@ -7,8 +7,11 @@ sorted by composite_score descending.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Sequence
 
 import numpy as np
@@ -17,6 +20,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from scholartrace.config import get_settings
 from scholartrace.models.schemas import Theme, Work
+
+_RANK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ranking")
 
 # ── Venue tiers ──────────────────────────────────────────────────────
 TOP_TIER_VENUES: set[str] = {
@@ -252,3 +257,16 @@ def rank_papers(
 
     works.sort(key=lambda wk: wk.composite_score, reverse=True)
     return works
+
+
+async def rank_papers_async(
+    works: list[Work],
+    theme: Theme,
+    weights: dict[str, float] | None = None,
+) -> list[Work]:
+    """Async wrapper that runs ranking in a thread pool to avoid blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _RANK_EXECUTOR,
+        partial(rank_papers, works, theme, weights),
+    )
