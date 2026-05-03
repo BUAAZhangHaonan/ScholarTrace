@@ -495,6 +495,7 @@ async def _batched_select_papers(
     )
     merged: dict[int, dict[str, Any]] = {}  # original_index -> result
     offset = 0  # running index into original paper_dicts
+    dropped_batches = 0
 
     for batch_idx, batch in enumerate(batches):
         batch_size = len(batch)
@@ -513,11 +514,20 @@ async def _batched_select_papers(
                     system_prompt=system_prompt,
                 )
             except (DeepXivAgentError, Exception) as exc:
-                logger.warning(
-                    "[PIPELINE] Batch %d/%d failed: %s",
-                    batch_idx + 1, len(batches), exc,
-                )
-                continue
+                # Retry once
+                try:
+                    batch_results = await agent.select_papers(
+                        batch_papers, theme_description,
+                        max_select=per_batch_select,
+                        system_prompt=system_prompt,
+                    )
+                except (DeepXivAgentError, Exception) as retry_exc:
+                    logger.error(
+                        "[PIPELINE] Batch %d/%d DROPPED (retry also failed): %s",
+                        batch_idx + 1, len(batches), retry_exc,
+                    )
+                    dropped_batches += 1
+                    continue
 
         # Adjust indices back to original paper_dicts
         batch_offset = offset - batch_size
@@ -535,6 +545,12 @@ async def _batched_select_papers(
                     merged[orig_idx] = item
             else:
                 merged[orig_idx] = item
+
+    if dropped_batches:
+        logger.warning(
+            "[PIPELINE] Batched selection dropped %d/%d batches",
+            dropped_batches, len(batches),
+        )
 
     return list(merged.values())
 
