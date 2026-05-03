@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     deepxiv_agent_fallback_top_k: int = 20
 
     # --- Server settings ---
+    shutdown_timeout_seconds: int = 30
     api_host: str = "127.0.0.1"
     api_port: int = 9000
     mcp_host: str = "127.0.0.1"

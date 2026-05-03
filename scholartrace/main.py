@@ -52,6 +52,7 @@ def run_api():
         host=settings.api_host,
         port=settings.api_port,
         reload=False,
+        timeout_graceful_shutdown=settings.shutdown_timeout_seconds,
     )
 
 
@@ -70,6 +71,7 @@ def run_mcp():
         host=settings.mcp_host,
         port=settings.mcp_port,
         reload=False,
+        timeout_graceful_shutdown=settings.shutdown_timeout_seconds,
     )
 
 
