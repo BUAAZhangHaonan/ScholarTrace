@@ -404,7 +404,10 @@ def _estimate_papers_tokens(
 
 
 def _get_model_context_tokens(entry: ModelPoolEntry, settings: Settings) -> int:
-    """Return the context window size for a given model pool entry."""
+    """Return the context window size for a given model pool entry.
+
+    Used for PromptBudget batch sizing — this is the total input+output budget.
+    """
     if entry.backend == "deepseek" and settings.model_path == "deepseek_flash":
         return 1_000_000
     if entry.backend == "glm":
@@ -415,6 +418,29 @@ def _get_model_context_tokens(entry: ModelPoolEntry, settings: Settings) -> int:
         return 128_000  # glm-5-turbo and other GLM models
     if entry.backend == "deepseek":
         return 128_000
+    if entry.backend == "qwen":
+        return 32_768
+    return 128_000
+
+
+def _get_model_max_output_tokens(entry: ModelPoolEntry, settings: Settings) -> int:
+    """Return the maximum output tokens (max_tokens) for a given model pool entry.
+
+    This is NOT the same as context window — it's the API's max_tokens limit.
+    For GLM models with thinking enabled, max_tokens is capped at 128K even when
+    the context window is 200K.
+    """
+    if entry.backend == "deepseek":
+        # deepseek-v4-flash/v4-pro: max output = 384K (393216)
+        # deepseek-chat (legacy): max output = 128K
+        if "v4" in entry.model:
+            return 393_216
+        return 128_000
+    if entry.backend == "glm":
+        # glm-4.5 max output is 96K (98304); glm-4.6 max output is 128K (131072)
+        if "4.5" in entry.model:
+            return 98_304
+        return 131_072
     if entry.backend == "qwen":
         return 32_768
     return 128_000
@@ -695,6 +721,7 @@ async def run_query_pipeline(
             )
 
             context_tokens = _get_model_context_tokens(entry, resolved)
+            max_output_tokens = _get_model_max_output_tokens(entry, resolved)
             agent = DeepXivAgent(
                 api_key=entry.api_key,
                 base_url=entry.base_url,
@@ -705,6 +732,7 @@ async def run_query_pipeline(
                 max_retries=0,
                 retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
                 context_tokens=context_tokens,
+                max_output_tokens=max_output_tokens,
             )
             try:
                 selection_results = await _batched_select_papers(

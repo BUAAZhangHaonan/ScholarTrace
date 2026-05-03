@@ -146,8 +146,10 @@ class DeepXivAgentError(RuntimeError):
 class DeepXivAgent:
     """Agent that reranks papers using the configured LLM endpoint.
 
-    Supports two backends:
+    Supports three backends:
     - "glm": Zhipu BigModel GLM API (sends thinking: enabled)
+    - "deepseek": DeepSeek V4 API (sends thinking: disabled for structured output)
+    - "qwen": Local Qwen via vLLM (sends chat_template_kwargs to disable thinking)
     - "qwen": Local Qwen via vLLM (sends chat_template_kwargs to disable thinking)
     """
 
@@ -166,12 +168,14 @@ class DeepXivAgent:
         batch_size: int = _DEFAULT_BATCH_SIZE,
         fallback_top_k: int = 20,
         context_tokens: int | None = None,
+        max_output_tokens: int | None = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
         self._backend = backend
         self._context_tokens = context_tokens or _DEFAULT_BACKEND_TOKENS.get(backend, 128_000)
+        self._max_output_tokens = max_output_tokens
         self._max_fulltext = max_fulltext
         self._prompt_budget = prompt_budget
         self._request_timeout_seconds = max(1.0, request_timeout_seconds)
@@ -187,7 +191,7 @@ class DeepXivAgent:
         client_kwargs: dict[str, Any] = {
             "timeout": httpx.Timeout(
                 connect=self._request_timeout_seconds,  # 5s: fail fast if API unreachable
-                read=120.0,   # 2min: balance between model processing and responsiveness
+                read=300.0,   # 5min: reasoning models with thinking need time for 100+ papers
                 write=5.0,
                 pool=5.0,
             ),
@@ -267,7 +271,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": self._context_tokens,
+                "max_tokens": self._max_output_tokens or self._context_tokens,
                 "temperature": 0.3,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -278,7 +282,8 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": self._context_tokens,
+                "max_tokens": self._max_output_tokens or self._context_tokens,
+                "thinking": {"type": "disabled"},
                 "temperature": 0.3,
             }
         return {
@@ -288,7 +293,7 @@ class DeepXivAgent:
                 {"role": "user", "content": user_msg},
             ],
             "thinking": {"type": "enabled"},
-            "max_tokens": self._context_tokens,
+            "max_tokens": self._max_output_tokens or self._context_tokens,
             "temperature": 0.3,
         }
 
@@ -738,7 +743,7 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": self._context_tokens,
+                "max_tokens": self._max_output_tokens or self._context_tokens,
                 "temperature": 0.3,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -749,7 +754,8 @@ class DeepXivAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": self._context_tokens,
+                "max_tokens": self._max_output_tokens or self._context_tokens,
+                "thinking": {"type": "disabled"},
                 "temperature": 0.3,
             }
         return {
@@ -759,7 +765,7 @@ class DeepXivAgent:
                 {"role": "user", "content": user_msg},
             ],
             "thinking": {"type": "enabled"},
-            "max_tokens": self._context_tokens,
+            "max_tokens": self._max_output_tokens or self._context_tokens,
             "temperature": 0.3,
         }
 
