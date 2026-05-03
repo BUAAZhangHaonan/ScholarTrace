@@ -706,59 +706,66 @@ async def run_query_pipeline(
     max_attempts = len(pool.entries) * 2  # try each model up to twice
     last_error = ""
 
-    with pipeline_timer.stage("agent_refinement"):
-        for attempt in range(max_attempts):
-            try:
-                entry = await pool.acquire(timeout=5.0)
-            except RuntimeError:
-                logger.warning("[PIPELINE] ModelPool exhausted, using deterministic fallback")
-                break
+    try:
+        with pipeline_timer.stage("agent_refinement"):
+            async with asyncio.timeout(resolved.agent_total_timeout_seconds):
+                for attempt in range(max_attempts):
+                    try:
+                        entry = await pool.acquire(timeout=5.0)
+                    except RuntimeError:
+                        logger.warning("[PIPELINE] ModelPool exhausted, using deterministic fallback")
+                        break
 
-            logger.info(
-                "[PIPELINE] Attempt %d/%d: acquired %s/%s (cooldown=%s)",
-                attempt + 1, max_attempts,
-                entry.backend, entry.model, entry.in_cooldown,
-            )
+                    logger.info(
+                        "[PIPELINE] Attempt %d/%d: acquired %s/%s (cooldown=%s)",
+                        attempt + 1, max_attempts,
+                        entry.backend, entry.model, entry.in_cooldown,
+                    )
 
-            context_tokens = _get_model_context_tokens(entry, resolved)
-            max_output_tokens = _get_model_max_output_tokens(entry, resolved)
-            agent = DeepXivAgent(
-                api_key=entry.api_key,
-                base_url=entry.base_url,
-                model=entry.model,
-                backend=entry.backend,
-                request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
-                total_timeout_seconds=resolved.agent_total_timeout_seconds,
-                max_retries=0,
-                retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
-                context_tokens=context_tokens,
-                max_output_tokens=max_output_tokens,
-            )
-            try:
-                selection_results = await _batched_select_papers(
-                    agent, paper_dicts, theme_description,
-                    system_prompt=system_prompt,
-                    context_tokens=context_tokens,
-                    requested_final=requested_final,
-                    timer=pipeline_timer,
-                )
-                pool.release(entry, success=True)
-                logger.info(
-                    "[PIPELINE] %s/%s SUCCEEDED, selected=%d",
-                    entry.backend, entry.model,
-                    len(selection_results) if selection_results else 0,
-                )
-                break
-            except (DeepXivAgentError, Exception) as exc:
-                last_error = str(exc)
-                pool.release(entry, success=False)
-                logger.warning(
-                    "[PIPELINE] %s/%s FAILED: %s",
-                    entry.backend, entry.model,
-                    exc,
-                )
-            finally:
-                await agent.close()
+                    context_tokens = _get_model_context_tokens(entry, resolved)
+                    max_output_tokens = _get_model_max_output_tokens(entry, resolved)
+                    agent = DeepXivAgent(
+                        api_key=entry.api_key,
+                        base_url=entry.base_url,
+                        model=entry.model,
+                        backend=entry.backend,
+                        request_timeout_seconds=resolved.deepxiv_agent_http_timeout_seconds,
+                        total_timeout_seconds=resolved.agent_total_timeout_seconds,
+                        max_retries=0,
+                        retry_backoff_seconds=resolved.deepxiv_agent_retry_backoff_seconds,
+                        context_tokens=context_tokens,
+                        max_output_tokens=max_output_tokens,
+                    )
+                    try:
+                        selection_results = await _batched_select_papers(
+                            agent, paper_dicts, theme_description,
+                            system_prompt=system_prompt,
+                            context_tokens=context_tokens,
+                            requested_final=requested_final,
+                            timer=pipeline_timer,
+                        )
+                        pool.release(entry, success=True)
+                        logger.info(
+                            "[PIPELINE] %s/%s SUCCEEDED, selected=%d",
+                            entry.backend, entry.model,
+                            len(selection_results) if selection_results else 0,
+                        )
+                        break
+                    except (DeepXivAgentError, Exception) as exc:
+                        last_error = str(exc)
+                        pool.release(entry, success=False)
+                        logger.warning(
+                            "[PIPELINE] %s/%s FAILED: %s",
+                            entry.backend, entry.model,
+                            exc,
+                        )
+                    finally:
+                        await agent.close()
+    except TimeoutError:
+        logger.warning(
+            "[PIPELINE] Agent refinement timed out after %ds",
+            resolved.agent_total_timeout_seconds,
+        )
 
     # Deterministic fallback if all model attempts failed
     if selection_results is None:
