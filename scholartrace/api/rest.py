@@ -15,6 +15,7 @@ import logging
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
 from typing import Any
 from fastapi.responses import PlainTextResponse
+from contextlib import asynccontextmanager
 
 from scholartrace.api.contracts import error_response, safe_http_exception_response
 from scholartrace.api.payloads import (
@@ -41,7 +42,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Application instance
 # ---------------------------------------------------------------------------
-app = FastAPI(title="ScholarTrace", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    global _deepxiv_connector_rest, _deepxiv_agent_rest
+    if _deepxiv_connector_rest is not None:
+        await _deepxiv_connector_rest.close()
+        _deepxiv_connector_rest = None
+    if _deepxiv_agent_rest is not None:
+        await _deepxiv_agent_rest.close()
+        _deepxiv_agent_rest = None
+
+
+app = FastAPI(title="ScholarTrace", version="0.1.0", lifespan=lifespan)
 
 # Module-level singletons – initialised lazily on first request.
 _storage: StorageService | None = None

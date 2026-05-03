@@ -35,8 +35,23 @@ def create_mcp(settings: Settings | None = None) -> FastMCP:
 
 
 def create_mcp_sse_app(settings: Settings | None = None):
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
     runtime_settings = settings or get_settings()
-    app = mcp.sse_app()
+    inner_app = mcp.sse_app()
+
+    async def shutdown_deepxiv():
+        global _deepxiv_connector
+        if _deepxiv_connector is not None:
+            await _deepxiv_connector.close()
+            _deepxiv_connector = None
+
+    app = Starlette(
+        routes=[Mount("/", app=inner_app)],
+        on_shutdown=[shutdown_deepxiv],
+    )
+
     if runtime_settings.access_token:
         return AccessTokenMiddleware(app, runtime_settings.access_token)
     return app
