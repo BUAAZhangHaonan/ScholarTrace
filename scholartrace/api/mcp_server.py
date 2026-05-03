@@ -247,6 +247,8 @@ async def query(
         "total_after_first_stage": result.total_after_first_stage,
         "total_agent_candidates": result.total_agent_candidates,
         "total_final": result.total_final,
+        "status": result.status,
+        "errors": result.errors,
         "papers": papers,
     }
     return json.dumps(payload, ensure_ascii=False)

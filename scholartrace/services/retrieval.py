@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from scholartrace.config import Settings, get_settings
@@ -215,6 +215,8 @@ class QueryPipelineResult:
     total_agent_candidates: int
     total_final: int
     works: list[Work]
+    status: str = "success"
+    errors: list[str] = field(default_factory=list)
 
 
 class QueryPipelineConfigurationError(ValueError):
@@ -656,7 +658,7 @@ async def run_query_pipeline(
                 "[PIPELINE] Retrieval done: raw=%d dedup=%d ranked=%d",
                 total_retrieved, total_after_dedup, len(ranked),
             )
-        except Exception:
+        except Exception as retrieval_exc:
             logger.exception(
                 "[PIPELINE] Retrieval FAILED for theme %s",
                 theme.id,
@@ -670,6 +672,8 @@ async def run_query_pipeline(
                 total_agent_candidates=0,
                 total_final=0,
                 works=saved,
+                status="retrieval_failed",
+                errors=[str(retrieval_exc)],
             )
 
     total_after_first_stage = len(ranked)
@@ -724,6 +728,8 @@ async def run_query_pipeline(
     selection_results: list[dict[str, Any]] | None = None
     max_attempts = len(pool.entries) * 2  # try each model up to twice
     last_error = ""
+    pipeline_status = "success"
+    pipeline_errors: list[str] = []
 
     try:
         with pipeline_timer.stage("agent_refinement"):
@@ -785,6 +791,7 @@ async def run_query_pipeline(
             "[PIPELINE] Agent refinement timed out after %ds",
             resolved.agent_total_timeout_seconds,
         )
+        pipeline_status = "timeout"
 
     # Deterministic fallback if all model attempts failed
     if selection_results is None:
@@ -792,6 +799,10 @@ async def run_query_pipeline(
             "[PIPELINE] ALL models FAILED; deterministic fallback. Last error: %s",
             last_error,
         )
+        if pipeline_status == "success":
+            pipeline_status = "fallback"
+        if last_error:
+            pipeline_errors.append(last_error)
         fallback_agent = DeepXivAgent(
             api_key="",
             base_url=resolved.bigmodel_base_url,
@@ -816,6 +827,8 @@ async def run_query_pipeline(
             total_agent_candidates=len(agent_candidates),
             total_final=0,
             works=saved,
+            status=pipeline_status,
+            errors=pipeline_errors,
         )
 
     scored, selected = _collect_selection_works(selection_results, agent_candidates)
@@ -853,6 +866,8 @@ async def run_query_pipeline(
         total_agent_candidates=len(agent_candidates),
         total_final=len(saved),
         works=saved,
+        status=pipeline_status,
+        errors=pipeline_errors,
     )
 
 
