@@ -10,6 +10,8 @@ Tests the multi-model concurrent pool:
 
 import asyncio
 import json
+import os
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -19,7 +21,10 @@ from mcp.client.session import ClientSession
 
 # --- Configuration ---
 MCP_URL = "http://127.0.0.1:8001/sse"
-AUTH_TOKEN = "g203-mcp"
+AUTH_TOKEN = os.environ.get("SCHOLARTRACE_ACCESS_TOKEN")
+if not AUTH_TOKEN:
+    print("ERROR: SCHOLARTRACE_ACCESS_TOKEN not set", file=sys.stderr)
+    sys.exit(1)
 NUM_CONCURRENT = 20
 AGENT_CANDIDATE_LIMIT = 200
 FINAL_LIMIT = 25

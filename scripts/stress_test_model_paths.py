@@ -206,7 +206,10 @@ class SSEClient:
 
 SSE_PORT = int(os.environ.get("SCHOLARTRACE_STRESS_PORT", "8002"))
 SSE_HOST = os.environ.get("SCHOLARTRACE_STRESS_HOST", "127.0.0.1")
-ACCESS_TOKEN = os.environ.get("SCHOLARTRACE_ACCESS_TOKEN", "g203-mcp")
+ACCESS_TOKEN = os.environ.get("SCHOLARTRACE_ACCESS_TOKEN")
+if not ACCESS_TOKEN:
+    print("ERROR: SCHOLARTRACE_ACCESS_TOKEN not set", file=sys.stderr)
+    sys.exit(1)
 CONCURRENT_QUERIES = int(os.environ.get("SCHOLARTRACE_STRESS_CONCURRENT", "5"))
 TARGET_SECONDS = 300  # 5 min target per query
 BASE_URL = f"http://{SSE_HOST}:{SSE_PORT}"
