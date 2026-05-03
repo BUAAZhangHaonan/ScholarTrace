@@ -68,15 +68,18 @@ class ModelPool:
     """Priority-ordered pool of LLM models with per-model concurrency control."""
 
     _instance: ModelPool | None = None
+    _lock: asyncio.Lock = asyncio.Lock()
 
     def __init__(self, entries: list[ModelPoolEntry]) -> None:
         self._entries = entries
 
     @classmethod
-    def get(cls, settings: Settings) -> ModelPool:
+    async def get(cls, settings: Settings) -> ModelPool:
         """Return (and lazily create) the singleton ModelPool."""
         if cls._instance is None:
-            cls._instance = cls._build(settings)
+            async with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls._build(settings)
         return cls._instance
 
     @classmethod
@@ -693,7 +696,7 @@ async def run_query_pipeline(
     ]
 
     # --- Agent refinement: batched select_papers() via ModelPool ---
-    pool = ModelPool.get(resolved)
+    pool = await ModelPool.get(resolved)
     system_prompt = DeepXivAgent.build_stage2_prompt(max_select=requested_final)
 
     logger.info(
