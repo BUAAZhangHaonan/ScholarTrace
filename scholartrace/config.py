@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     llm_compression_model: str = "glm-4.7"
 
     # --- Local Qwen settings (fallback backend) ---
-    qwen_api_key: str = "sk-local-qwen3"
-    qwen_base_url: str = "http://10.134.87.107:8000/v1/chat/completions"
+    qwen_api_key: str = ""
+    qwen_base_url: str = "http://localhost:8000/v1/chat/completions"
     qwen_model: str = "Qwen/Qwen3.5-27B-GPTQ-Int4"
 
     # --- Retrieval timeout & retry ---
