@@ -35,13 +35,16 @@ def create_mcp(settings: Settings | None = None) -> FastMCP:
 
 
 def create_mcp_sse_app(settings: Settings | None = None):
+    from contextlib import asynccontextmanager
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
     runtime_settings = settings or get_settings()
     inner_app = mcp.sse_app()
 
-    async def shutdown_deepxiv():
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
         global _deepxiv_connector
         if _deepxiv_connector is not None:
             await _deepxiv_connector.close()
@@ -49,7 +52,7 @@ def create_mcp_sse_app(settings: Settings | None = None):
 
     app = Starlette(
         routes=[Mount("/", app=inner_app)],
-        on_shutdown=[shutdown_deepxiv],
+        lifespan=lifespan,
     )
 
     if runtime_settings.access_token:
@@ -277,6 +280,10 @@ async def read(
     allow_acquire: bool = False,
 ) -> str:
     """Read a paper through a unified layered interface.
+
+    Returns metadata and summary for a paper. For full paper text (Markdown),
+    use the ScholarAnalysis MCP tool `get_paper_text` instead, which handles
+    PDF download and parsing.
 
     `depth="direct_evidence"` uses the optional DeepXiv integration for
     arXiv-backed papers and can legitimately return `available=false`.
