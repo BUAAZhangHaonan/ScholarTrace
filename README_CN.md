@@ -153,6 +153,10 @@ ModelPool LLM 重排（多模型故障转移，总超时 180s）
 SCHOLARTRACE_MCP_TRANSPORT=stdio scholartrace-mcp
 ```
 
+## 配合使用
+
+- [ScholarAnalysis](https://github.com/BUAAZhangHaonan/ScholarAnalysis) — arXiv 论文下载、解析与聚焦分析 MCP 服务。提供 `get_paper_text`（完整 Markdown 文本）和 `analyze_paper`（按问题聚焦提取）两个 MCP 工具。配合 ScholarTrace 使用，可获取论文全文内容。
+
 ## 许可证
 
 MIT

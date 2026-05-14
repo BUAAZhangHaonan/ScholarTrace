@@ -208,6 +208,10 @@ See `scripts/scholartrace-mcp.service`. Place secrets in `/etc/scholartrace/scho
 SCHOLARTRACE_MCP_TRANSPORT=stdio scholartrace-mcp
 ```
 
+## Related Projects
+
+- [ScholarAnalysis](https://github.com/BUAAZhangHaonan/ScholarAnalysis) — arXiv paper download, parsing, and focused LLM analysis. Provides MCP tools `get_paper_text` (full Markdown) and `analyze_paper` (focused extraction by question). Use alongside ScholarTrace for complete paper content access.
+
 ## License
 
 MIT
